@@ -1,3 +1,7 @@
+#USE ROLE ACCOUNTADMIN;
+#GRANT READ SESSION ON ACCOUNT TO ROLE sysadmin;
+
+
 import streamlit as st
 from snowflake.snowpark.context import get_active_session
 import pandas as pd
