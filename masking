@@ -304,3 +304,20 @@ except Exception as e:
 # Footer
 st.markdown("---")
 st.markdown("© 2025 Snowflake Masking Policy Request Portal")
+
+
+# Insert data using the correct column names from the DDL
+for item in st.session_state.request_data:
+    # Create the fully qualified table name
+    fully_qualified_table_name = f"{item['Database_name']}.{item['Schema_name']}.{item['Table_name']}"
+    
+    session.sql(f"""
+        INSERT INTO OUR_FIRST_DB.TARGET_SCH.METADATA_TABLE (
+            Request_ID, S_No, Fully_Qualified_Table_Name, 
+            Field_name, Data_type, User_ID
+        ) VALUES (
+            '{item["Request ID"]}', {item["S.No"]}, 
+            '{fully_qualified_table_name}', 
+            '{item["Field_name"]}', '{item["Data_type"]}', '{current_user}'
+        )
+    """).collect()
