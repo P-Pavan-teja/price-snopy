@@ -1,0 +1,1038 @@
+import streamlit as st
+from snowflake.snowpark import Session
+import pandas as pd
+
+# Page configuration
+st.set_page_config(
+    page_title="Snowflake Metadata Mapping Tool",
+    page_icon="❄️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .main {
+        padding: 2rem;
+    }
+    .stButton button {
+        width: 100%;
+        border-radius: 5px;
+        height: 3rem;
+        font-weight: bold;
+    }
+    .sql-box {
+        background-color: #f8f9fa;
+        padding: 1rem;
+        border-radius: 5px;
+        font-family: monospace;
+        white-space: pre-wrap;
+        margin-top: 1rem;
+        border: 1px solid #dee2e6;
+    }
+    .target-column {
+        background-color: #f8f9fa;
+        padding: 0.5rem;
+        border-radius: 5px;
+        border: 1px solid #dee2e6;
+        display: block;
+        width: 100%;
+        margin: 0.25rem 0;
+        height: 3rem;
+        line-height: 1.4rem;
+    }
+    .insert-button button {
+        background-color: #28a745;
+        color: white;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Initialize session state
+if 'db_list' not in st.session_state:
+    st.session_state.db_list = []
+if 'schema_list' not in st.session_state:
+    st.session_state.schema_list = []
+if 'table_list' not in st.session_state:
+    st.session_state.table_list = []
+if 'selected_db' not in st.session_state:
+    st.session_state.selected_db = None
+if 'selected_schema' not in st.session_state:
+    st.session_state.selected_schema = None
+if 'selected_table' not in st.session_state:
+    st.session_state.selected_table = None
+if 'source_db_list' not in st.session_state:
+    st.session_state.source_db_list = []
+if 'source_schema_list' not in st.session_state:
+    st.session_state.source_schema_list = []
+if 'source_table_list' not in st.session_state:
+    st.session_state.source_table_list = []
+if 'selected_source_db' not in st.session_state:
+    st.session_state.selected_source_db = None
+if 'selected_source_schema' not in st.session_state:
+    st.session_state.selected_source_schema = None
+if 'selected_source_table' not in st.session_state:
+    st.session_state.selected_source_table = None
+if 'join_sources' not in st.session_state:
+    st.session_state.join_sources = []
+if 'join_source_columns' not in st.session_state:
+    st.session_state.join_source_columns = {}
+if 'join_conditions' not in st.session_state:
+    st.session_state.join_conditions = {}
+if 'source_table_added' not in st.session_state:
+    st.session_state.source_table_added = False
+if 'current_join_selection' not in st.session_state:
+    st.session_state.current_join_selection = "No"
+if 'insert_successful' not in st.session_state:
+    st.session_state.insert_successful = False
+
+# Main app header
+st.title("❄️ Snowflake Metadata Mapping Tool")
+st.markdown("Create and manage data transformation mappings")
+st.info("Target table: OUR_FIRST_DB.PUBLIC.MAPPING_META_DATA")
+
+# Function to fetch databases
+def fetch_databases():
+    try:
+        session = Session.builder.getOrCreate()
+        result = session.sql("SELECT DATABASE_NAME FROM INFORMATION_SCHEMA.DATABASES ORDER BY DATABASE_NAME ASC").collect()
+        return [row["DATABASE_NAME"] for row in result]
+    except Exception as e:
+        st.error(f"Error fetching databases: {e}")
+        return []
+
+# Function to fetch schemas for a selected database
+def fetch_schemas(database):
+    try:
+        session = Session.builder.getOrCreate()
+        result = session.sql(f"SELECT SCHEMA_NAME FROM {database}.INFORMATION_SCHEMA.SCHEMATA ORDER BY SCHEMA_NAME ASC").collect()
+        return [row["SCHEMA_NAME"] for row in result]
+    except Exception as e:
+        st.error(f"Error fetching schemas: {e}")
+        return []
+
+# Function to fetch tables for a selected database and schema
+def fetch_tables(database, schema):
+    try:
+        session = Session.builder.getOrCreate()
+        result = session.sql(f"SELECT TABLE_NAME FROM {database}.INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{schema}' AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME ASC").collect()
+        return [row["TABLE_NAME"] for row in result]
+    except Exception as e:
+        st.error(f"Error fetching tables: {e}")
+        return []
+
+# Function to fetch table columns
+def fetch_table_columns(database, schema, table):
+    try:
+        session = Session.builder.getOrCreate()
+        result = session.sql(f"SELECT COLUMN_NAME, ORDINAL_POSITION FROM {database}.INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table}' ORDER BY ORDINAL_POSITION ASC").collect()
+        return [{"name": row["COLUMN_NAME"], "position": row["ORDINAL_POSITION"]} for row in result]
+    except Exception as e:
+        st.error(f"Error fetching columns for {database}.{schema}.{table}: {e}")
+        return []
+
+def get_column_name(column):
+    """Extract the column name from a column object or return the column if it's a string."""
+    if isinstance(column, dict) and "name" in column:
+        return column["name"]
+    return column
+
+
+# Function to insert mapping data into the target metadata table
+# Function to insert mapping data into the target metadata table
+def insert_mapping_data():
+    try:
+        target_metadata_table = "OUR_FIRST_DB.PUBLIC.MAPPING_META_DATA"
+        session = Session.builder.getOrCreate()
+        target_table = f"{st.session_state.selected_db}.{st.session_state.selected_schema}.{st.session_state.selected_table}"
+        inserted_count = 0
+
+        # Find ordinal position for each target column
+        ordinal_positions = {}
+        for tcol in st.session_state.target_columns:
+            column_name = tcol["name"]
+            ordinal_positions[column_name] = tcol["position"]
+        
+        # First, insert column mapping rows
+        for target_column, source_column in st.session_state.column_mapping.items():
+            source_table = ""
+            transformation = st.session_state.transformations.get(target_column, "")
+            main_source = f"{st.session_state.selected_source_db}.{st.session_state.selected_source_schema}.{st.session_state.selected_source_table}"
+            
+            # Get the source column name consistently
+            source_col_name = get_column_name(source_column)
+            
+            # Determine the source table regardless of whether there's a transformation
+            # Check if the column name is in the main source
+            found_in_main = False
+            for col in st.session_state.join_source_columns[main_source]:
+                if source_col_name == get_column_name(col):
+                    source_table = main_source
+                    found_in_main = True
+                    break
+                    
+            if not found_in_main:
+                # Check other joined sources
+                for source in st.session_state.join_sources:
+                    for col in st.session_state.join_source_columns[source]:
+                        if source_col_name == get_column_name(col):
+                            source_table = source
+                            break
+                    if source_table:
+                        break
+            
+            # Set source table for transformation - instead of empty source table
+            # If there's a transformation, we still want to record which table the source column comes from
+            
+            # Empty join info for column mappings
+            join_info = ""
+            
+            # Set source_column to empty if there's a transformation, but keep the source_table
+            final_source_column = "" if transformation else source_column
+
+            ordinal_position = ordinal_positions.get(target_column, 0)
+            
+            current_timestamp = "CURRENT_TIMESTAMP()"
+            insert_sql = f"""
+            INSERT INTO {target_metadata_table} (
+                TARGET_TABLE, 
+                TARGET_COLUMN, 
+                SOURCE_TABLE, 
+                SOURCE_COLUMN, 
+                TRANSFORMATION,
+                JOIN_CONDITION,
+                TARGET_ORDINAL_POSITION, 
+                CREATED_AT,
+                UPDATED_AT
+            ) VALUES (
+                '{target_table}',
+                '{target_column}',
+                '{source_table}',
+                '{final_source_column}',
+                '{transformation}',
+                '{join_info}',
+                {ordinal_position},
+                {current_timestamp},
+                {current_timestamp}
+            )
+            """
+            session.sql(insert_sql).collect()
+            inserted_count += 1
+        
+        # Then insert join condition rows with empty fields
+        for source in st.session_state.join_sources:
+            if source in st.session_state.join_conditions:
+                join_type = st.session_state.join_conditions[source].get('join_type', 'INNER JOIN')
+                
+                if st.session_state.join_conditions[source].get('manual_condition'):
+                    join_info = f"{join_type} {source} ON {st.session_state.join_conditions[source]['manual_condition']}"
+                else:
+                    conditions = []
+                    target_table_short = st.session_state.selected_table
+                    source_table_short = source.split('.')[-1]
+                    
+                    for t_col, s_col in zip(
+                        st.session_state.join_conditions[source]['target_columns'],
+                        st.session_state.join_conditions[source]['source_columns']
+                    ):
+                        conditions.append(f"{target_table_short}.{t_col} = {source_table_short}.{s_col}")
+                    
+                    if conditions:
+                        join_info = f"{join_type} {source} ON {' AND '.join(conditions)}"
+                    else:
+                        continue
+                
+                current_timestamp = "CURRENT_TIMESTAMP()"
+                insert_sql = f"""
+                INSERT INTO {target_metadata_table} (
+                    TARGET_TABLE, 
+                    SOURCE_TABLE, 
+                    TARGET_COLUMN, 
+                    SOURCE_COLUMN, 
+                    TRANSFORMATION,
+                    JOIN_CONDITION,
+                    TARGET_ORDINAL_POSITION,
+                    CREATED_AT,
+                    UPDATED_AT
+                ) VALUES (
+                    '{target_table}',
+                    '',
+                    '',
+                    '',
+                    '',
+                    '{join_info}',
+                    0,
+                    {current_timestamp},
+                    {current_timestamp}
+                )
+                """
+                session.sql(insert_sql).collect()
+                inserted_count += 1
+        
+        return True, f"Successfully inserted {inserted_count} entries into {target_metadata_table}"
+    except Exception as e:
+        return False, f"Error inserting mapping data: {e}"
+
+
+def generate_preview_query():
+    """Generate a SQL query to preview source data with joins"""
+    if not st.session_state.mapping_saved:
+        return None
+    
+    # Get the main source table
+    main_source = f"{st.session_state.selected_source_db}.{st.session_state.selected_source_schema}.{st.session_state.selected_source_table}"
+    main_table_alias = st.session_state.selected_source_table
+    
+    # Collect mapped source columns
+    columns_to_select = []
+    
+    for tcol, source_col in st.session_state.column_mapping.items():
+        target_col_name = get_column_name(tcol)  
+        source_col_name = get_column_name(source_col) 
+
+        if target_col_name in st.session_state.transformations and st.session_state.transformations[target_col_name]:
+            transform_expr = st.session_state.transformations[target_col_name]
+            
+            # Find which table this column belongs to
+            for src, columns in st.session_state.join_source_columns.items():
+                table_alias = src.split('.')[-1]
+
+                for col in columns:
+                    col_name = get_column_name(col)  # Extract name consistently
+                    if col_name in transform_expr:
+                        transform_expr = transform_expr.replace(
+                            col_name, 
+                            f"{table_alias}.{col_name}"
+                        )
+            columns_to_select.append(f"{transform_expr} AS {target_col_name}")
+        else:
+            for src, columns in st.session_state.join_source_columns.items():
+                column_names = [get_column_name(col) for col in columns]  # Extract names
+                if source_col_name in column_names:  # Check against names
+                    table_alias = src.split('.')[-1]
+                    columns_to_select.append(f"{table_alias}.{source_col_name} AS {target_col_name}")
+                    break
+    
+    if not columns_to_select:
+        return None
+    
+    # Build the query
+    select_clause = ", ".join(columns_to_select)
+    from_clause = f"{main_source} AS {main_table_alias}"
+    
+    # Add join clauses
+    join_clauses = []
+    for joined_source in st.session_state.join_sources:
+        joined_table_alias = joined_source.split('.')[-1]
+        
+        if joined_source in st.session_state.join_conditions:
+            join_type = st.session_state.join_conditions[joined_source].get('join_type', 'INNER JOIN')
+            
+            if st.session_state.join_conditions[joined_source].get('manual_condition'):
+                # Replace table names with aliases in the manual condition
+                manual_condition = st.session_state.join_conditions[joined_source]['manual_condition']
+                
+                # Simply use the manual condition as is, assuming it uses the correct aliases
+                join_clause = f"{join_type} {joined_source} AS {joined_table_alias} ON {manual_condition}"
+            else:
+                # Use the column-based join
+                conditions = []
+                for t_col, s_col in zip(
+                    st.session_state.join_conditions[joined_source]['target_columns'],
+                    st.session_state.join_conditions[joined_source]['source_columns']
+                ):
+                    # Find which table the target column belongs to
+                    target_table_alias = st.session_state.selected_table
+                    
+                    conditions.append(f"{main_table_alias}.{t_col} = {joined_table_alias}.{s_col}")
+                
+                if conditions:
+                    join_clause = f"{join_type} {joined_source} AS {joined_table_alias} ON {' AND '.join(conditions)}"
+                else:
+                    # Skip this join if no conditions
+                    continue
+            
+            join_clauses.append(join_clause)
+    
+    # Complete the query
+    query = f"SELECT {select_clause} FROM {from_clause}"
+    if join_clauses:
+        query += " " + " ".join(join_clauses)
+    
+    # Add LIMIT
+    query += " LIMIT 10"
+    
+    return query
+
+def execute_preview_query(query):
+    """Execute the preview query and return results"""
+    try:
+        session = Session.builder.getOrCreate()
+        result = session.sql(query).to_pandas()
+        return result, None
+    except Exception as e:
+        return None, f"Error executing preview query: {e}"
+
+
+
+# Initialize db_list if empty
+if not st.session_state.db_list:
+    with st.spinner("Fetching databases..."):
+        st.session_state.db_list = fetch_databases()
+        st.session_state.source_db_list = st.session_state.db_list
+
+# Create columns for target selections
+col1, col2, col3 = st.columns(3)
+
+# Target selections
+with col1:
+    st.subheader("Select Target Database")
+    st.selectbox(
+        "Target Database",
+        options=st.session_state.db_list if st.session_state.db_list else ["No options to select."],
+        key="selected_db",
+        on_change=lambda: st.session_state.update(schema_list=fetch_schemas(st.session_state.selected_db), selected_schema=None, table_list=[], selected_table=None, source_table_added=False)
+    )
+
+with col2:
+    st.subheader("Select Target Schema")
+    st.selectbox(
+        "Target Schema",
+        options=st.session_state.schema_list if st.session_state.schema_list else ["No options to select."],
+        key="selected_schema",
+        on_change=lambda: st.session_state.update(table_list=fetch_tables(st.session_state.selected_db, st.session_state.selected_schema), selected_table=None, source_table_added=False)
+    )
+
+with col3:
+    st.subheader("Select Target Table")
+    st.selectbox(
+        "Target Table",
+        options=st.session_state.table_list if st.session_state.table_list else ["No options to select."],
+        key="selected_table"
+    )
+
+# Show source selections only after target table is selected
+if st.session_state.selected_table:
+    source_container = st.container()
+    with source_container:
+        st.markdown("---")
+        st.subheader("Source Table Selection")
+        source_cols = st.columns(3)
+        
+        with source_cols[0]:
+            st.selectbox(
+                "Source Database",
+                options=st.session_state.source_db_list if st.session_state.source_db_list else ["No options to select."],
+                key="selected_source_db",
+                on_change=lambda: st.session_state.update(source_schema_list=fetch_schemas(st.session_state.selected_source_db), selected_source_schema=None, source_table_list=[], selected_source_table=None, source_table_added=False)
+            )
+
+        with source_cols[1]:
+            st.selectbox(
+                "Source Schema",
+                options=st.session_state.source_schema_list if st.session_state.source_schema_list else ["No options to select."],
+                key="selected_source_schema",
+                on_change=lambda: st.session_state.update(source_table_list=fetch_tables(st.session_state.selected_source_db, st.session_state.selected_source_schema), selected_source_table=None, source_table_added=False)
+            )
+
+        with source_cols[2]:
+            st.selectbox(
+                "Source Table",
+                options=st.session_state.source_table_list if st.session_state.source_table_list else ["No options to select."],
+                key="selected_source_table"
+            )
+
+    if not (st.session_state.get('selected_source_db') and st.session_state.get('selected_source_schema') and st.session_state.get('selected_source_table')):
+        st.info("Please select a source database, schema, and table to continue")
+    
+    if (st.session_state.selected_source_db and st.session_state.selected_source_schema and st.session_state.selected_source_table):
+        current_source = f"{st.session_state.selected_source_db}.{st.session_state.selected_source_schema}.{st.session_state.selected_source_table}"
+        
+        if current_source not in st.session_state.join_source_columns:
+            main_source_columns = fetch_table_columns(
+                st.session_state.selected_source_db, 
+                st.session_state.selected_source_schema, 
+                st.session_state.selected_source_table
+            )
+            st.session_state.join_source_columns[current_source] = main_source_columns
+            st.session_state.source_columns = main_source_columns
+        
+        st.markdown("---")
+        st.subheader("Join Additional Source Tables")
+        
+        col_join = st.columns(2)
+        with col_join[0]:
+            join_option = st.radio(
+                "Would you like to join another source table?",
+                options=["No", "Yes"],
+                key="current_join_selection"
+            )
+            
+        with col_join[1]:
+            if st.session_state.join_sources:
+                st.write("Current joined sources:")
+                for idx, source in enumerate(st.session_state.join_sources):
+                    st.write(f"{idx+1}. {source}")
+        
+        if st.session_state.current_join_selection == "Yes":
+            st.markdown("### Select Additional Source Table")
+            
+            if 'additional_source_db' not in st.session_state:
+                st.session_state.additional_source_db = None
+            if 'additional_source_schema' not in st.session_state:
+                st.session_state.additional_source_schema = None
+            if 'additional_source_table' not in st.session_state:
+                st.session_state.additional_source_table = None
+                
+            def on_additional_db_select():
+                if st.session_state.additional_source_db:
+                    with st.spinner("Fetching schemas..."):
+                        st.session_state.additional_source_schema_list = fetch_schemas(st.session_state.additional_source_db)
+                    st.session_state.additional_source_schema = None
+                    st.session_state.additional_source_table_list = []
+                    st.session_state.additional_source_table = None
+
+            def on_additional_schema_select():
+                if st.session_state.additional_source_schema and st.session_state.additional_source_db:
+                    with st.spinner("Fetching tables..."):
+                        st.session_state.additional_source_table_list = fetch_tables(
+                            st.session_state.additional_source_db, 
+                            st.session_state.additional_source_schema
+                        )
+                    st.session_state.additional_source_table = None
+                
+            if 'additional_source_schema_list' not in st.session_state:
+                st.session_state.additional_source_schema_list = []
+            if 'additional_source_table_list' not in st.session_state:
+                st.session_state.additional_source_table_list = []
+                
+            add_source_cols = st.columns(3)
+            
+            with add_source_cols[0]:
+                st.selectbox(
+                    "Additional Source Database",
+                    options=st.session_state.db_list if st.session_state.db_list else ["No options to select."],
+                    key="additional_source_db",
+                    on_change=on_additional_db_select,
+                    index=0 if st.session_state.additional_source_db is None else st.session_state.db_list.index(st.session_state.additional_source_db)
+                )
+
+            with add_source_cols[1]:
+                st.selectbox(
+                    "Additional Source Schema",
+                    options=st.session_state.additional_source_schema_list if st.session_state.additional_source_schema_list else ["No options to select."],
+                    key="additional_source_schema",
+                    on_change=on_additional_schema_select,
+                    index=0 if st.session_state.additional_source_schema is None else st.session_state.additional_source_schema_list.index(st.session_state.additional_source_schema)
+                )
+
+            with add_source_cols[2]:
+                st.selectbox(
+                    "Additional Source Table",
+                    options=st.session_state.additional_source_table_list if st.session_state.additional_source_table_list else ["No options to select."],
+                    key="additional_source_table",
+                    index=0 if st.session_state.additional_source_table is None else st.session_state.additional_source_table_list.index(st.session_state.additional_source_table)
+                )
+                
+            if (st.session_state.additional_source_db and st.session_state.additional_source_schema and st.session_state.additional_source_table):
+                additional_source = f"{st.session_state.additional_source_db}.{st.session_state.additional_source_schema}.{st.session_state.additional_source_table}"
+                
+                st.markdown("### Define Join Condition")
+                
+                join_types = [
+                    "INNER JOIN",
+                    "LEFT JOIN",
+                    "RIGHT JOIN",
+                    "LEFT OUTER JOIN", 
+                    "RIGHT OUTER JOIN", 
+                    "FULL OUTER JOIN",
+                ]
+                
+                if additional_source not in st.session_state.join_conditions:
+                    st.session_state.join_conditions[additional_source] = {
+                        'target_columns': [],
+                        'source_columns': [],
+                        'join_type': 'INNER JOIN'
+                    }
+
+                selected_join_type = st.selectbox(
+                    "Join Type",
+                    options=join_types,
+                    index=join_types.index(st.session_state.join_conditions[additional_source]['join_type']),
+                    key=f"join_type_{additional_source}"
+                )
+                
+                
+                # Initialize or ensure join conditions exist for this source
+                if additional_source not in st.session_state.join_conditions:
+                    st.session_state.join_conditions[additional_source] = {
+                        'target_columns': [],  # These will store source table columns
+                        'source_columns': [],  # These will store join table columns
+                        'join_type': 'INNER JOIN'
+                    }
+                
+                join_col1, join_col2 = st.columns(2)
+                
+                # Keep the original variable names to maintain compatibility
+                with join_col1:
+                    st.write("**Source Table**") 
+                
+                    # Fetch the source table columns
+                    source_columns_full = fetch_table_columns(
+                        st.session_state.selected_source_db,
+                        st.session_state.selected_source_schema,
+                        st.session_state.selected_source_table
+                    )
+                
+                    # Now correctly use the source_columns_full variable
+                    source_column_names = [col["name"] for col in source_columns_full]
+                    source_column_map = {col["name"]: col for col in source_columns_full}
+
+                    default_target_names = []
+                    for col in st.session_state.join_conditions[additional_source]['target_columns']:
+                        if isinstance(col, dict) and "name" in col:
+                            default_target_names.append(col["name"])
+                        else:
+                            default_target_names.append(col)
+
+                    selected_target_names = st.multiselect(
+                        "Source Table Columns",
+                        options=source_column_names,
+                        default=default_target_names,
+                        key=f"target_columns_{additional_source}"
+                    )
+
+                    st.session_state.join_conditions[additional_source]['target_columns'] = selected_target_names
+                
+                with join_col2:
+                    st.write("**Join Table 1**")
+                    
+                    add_columns_full = fetch_table_columns(
+                        st.session_state.additional_source_db,
+                        st.session_state.additional_source_schema,
+                        st.session_state.additional_source_table
+                    )
+                    
+                    # Add this line to define add_column_names
+                    add_column_names = [col["name"] for col in add_columns_full]
+                    
+                    default_source_names = []
+                    for col in st.session_state.join_conditions[additional_source]['source_columns']:
+                        if isinstance(col, dict) and "name" in col:
+                            default_source_names.append(col["name"])
+                        else:
+                            default_source_names.append(col)
+                    
+                    selected_source_names = st.multiselect(
+                        "Join Table 1 Columns",
+                        options=add_column_names,
+                        default=default_source_names,
+                        key=f"source_columns_{additional_source}"
+                    )
+                    st.session_state.join_conditions[additional_source]['source_columns'] = selected_source_names
+
+                    selected_target_columns = st.session_state.join_conditions[additional_source]['target_columns']
+                    selected_source_columns = st.session_state.join_conditions[additional_source]['source_columns']
+
+                st.markdown("---")
+                st.write("**Or manually enter a custom join condition:**")
+                manual_join_condition = st.text_area(
+                    "Custom Join Condition",
+                    value=st.session_state.join_conditions.get(additional_source, {}).get('manual_condition', ''),
+                    placeholder="Example: target_table.column1 = source_table.column2 AND target_table.column3 = source_table.column4",
+                    help="Enter a custom join condition. If provided, this will be used instead of the column selections above."
+                )
+
+                if manual_join_condition:
+                    st.session_state.join_conditions[additional_source]['manual_condition'] = manual_join_condition
+                elif 'manual_condition' in st.session_state.join_conditions[additional_source]:
+                    st.session_state.join_conditions[additional_source]['manual_condition'] = ""
+                
+                if manual_join_condition:
+                    if additional_source not in st.session_state.join_conditions:
+                        st.session_state.join_conditions[additional_source] = {
+                            'target_columns': [],
+                            'source_columns': [],
+                            'join_type': 'INNER JOIN',
+                            'manual_condition': ''
+                        }
+                    st.session_state.join_conditions[additional_source]['manual_condition'] = manual_join_condition
+                
+                # Updated code using your new variable names
+                if selected_target_columns and selected_source_columns:  
+                    st.session_state.join_conditions[additional_source]['target_columns'] = selected_target_columns
+                    st.session_state.join_conditions[additional_source]['source_columns'] = selected_source_columns
+                    pass
+                    
+                if st.session_state.join_conditions[additional_source].get('manual_condition'):
+                    join_type = st.session_state.join_conditions[additional_source]['join_type']
+                    st.write("**Selected Join Condition (Manual):**")
+                    st.write(f"**Type:** `{join_type}`")
+                    st.write("**Custom Condition:**")
+                    st.code(st.session_state.join_conditions[additional_source]['manual_condition'], language="sql")
+                    
+                    join_statement = f"{join_type} {additional_source} ON {st.session_state.join_conditions[additional_source]['manual_condition']}"
+                    st.code(join_statement, language="sql")
+                elif st.session_state.join_conditions[additional_source]['target_columns'] and st.session_state.join_conditions[additional_source]['source_columns']:
+                    # Original column-based join display code remains here
+                    target_table_name = f"{st.session_state.selected_db}.{st.session_state.selected_schema}.{st.session_state.selected_table}"
+                    target_table_short = st.session_state.selected_table
+                    source_table_short = additional_source.split('.')[-1]
+                    
+                    join_type = st.session_state.join_conditions[additional_source]['join_type']
+                    st.write("**Selected Join Condition:**")
+                    st.write(f"**Type:** `{join_type}`")
+                    st.write("**On:**")
+                    for target_col, source_col in zip(
+                        st.session_state.join_conditions[additional_source]['target_columns'],
+                        st.session_state.join_conditions[additional_source]['source_columns']
+                    ):
+                        st.write(f"`{target_table_short}.{target_col}` = `{source_table_short}.{source_col}`")
+
+                    # Build join condition with table names
+                    join_conditions = []
+                    for target_col, source_col in zip(
+                        st.session_state.join_conditions[additional_source]['target_columns'],
+                        st.session_state.join_conditions[additional_source]['source_columns']
+                    ):
+                        
+                        join_conditions.append(f"{target_table_short}.{target_col} = {source_table_short}.{source_col}")
+
+                    
+                    join_statement = f"{join_type} {additional_source} ON {' AND '.join(join_conditions)}"
+                    st.code(join_statement, language="sql")
+                
+                if st.button("Add This Source Table"):
+                    if additional_source not in st.session_state.join_sources:
+                        if (not st.session_state.join_conditions[additional_source]['target_columns'] or 
+                            not st.session_state.join_conditions[additional_source]['source_columns']):
+                            st.warning("Please define join conditions before adding the source table.")
+                        else:
+                            st.session_state.join_sources.append(additional_source)
+                            if additional_source not in st.session_state.join_source_columns:
+                                joined_source_columns = fetch_table_columns(
+                                    st.session_state.additional_source_db,
+                                    st.session_state.additional_source_schema,
+                                    st.session_state.additional_source_table
+                                )
+                                st.session_state.join_source_columns[additional_source] = joined_source_columns
+                            st.success(f"Added {additional_source} to joined sources!")
+                            st.session_state.source_table_added = True
+                            st.rerun()
+                    else:
+                        st.warning(f"Source {additional_source} is already in the joined sources list.")
+        else:
+            if st.button("Continue to Column Mapping"):
+                st.session_state.source_table_added = True
+                st.rerun()
+
+    if st.session_state.source_table_added:
+        st.markdown("---")
+        st.subheader("Column Mapping")
+        
+        if 'target_columns' not in st.session_state:
+            st.session_state.target_columns = fetch_table_columns(
+                st.session_state.selected_db, 
+                st.session_state.selected_schema, 
+                st.session_state.selected_table
+            )
+        
+        all_source_columns = []
+        source_column_to_table = {}
+        
+        main_source = f"{st.session_state.selected_source_db}.{st.session_state.selected_source_schema}.{st.session_state.selected_source_table}"
+        
+        for column in st.session_state.join_source_columns[main_source]:
+            column_name = get_column_name(column)
+            all_source_columns.append(column)
+            source_column_to_table[column_name] = st.session_state.selected_source_table
+        
+        for source in st.session_state.join_sources:
+            if source not in st.session_state.join_source_columns:
+                # Fetch columns if missing
+                source_parts = source.split('.')
+                if len(source_parts) == 3:  # Make sure we have db.schema.table format
+                    db_name, schema_name, table_name = source_parts
+                    source_columns = fetch_table_columns(db_name, schema_name, table_name)
+                    st.session_state.join_source_columns[source] = source_columns
+                else:
+                    # Initialize with empty list to prevent further errors
+                    st.session_state.join_source_columns[source] = []
+                    st.error(f"Unable to fetch columns for {source}. Invalid format.")
+                    
+            table_name = source.split('.')[-1]
+            for column in st.session_state.join_source_columns[source]:
+                column_name = get_column_name(column)
+                existing_names = [get_column_name(col) for col in all_source_columns]
+                if column_name in existing_names:
+                    column_with_table = f"{column_name}_{table_name}"
+                    all_source_columns.append(column)
+                    source_column_to_table[column_with_table] = table_name  
+                    source_column_to_table[f"_original_{column_with_table}"] = column_name  
+                else:
+                    all_source_columns.append(column)
+                    source_column_to_table[column_name] = table_name
+        
+        if 'column_mapping' not in st.session_state:
+            st.session_state.column_mapping = {}
+            
+            # Create a mapping of uppercase source column names to original column names
+            uppercase_source_columns = {}
+            for source, columns in st.session_state.join_source_columns.items():
+                for col in columns:
+                    col_name = col["name"] if isinstance(col, dict) else col  # Handle both formats
+                    uppercase_source_columns[col_name.upper()] = (col_name, source)
+    
+            # Auto-map target columns to source columns based on uppercase matching
+            for tcol in st.session_state.target_columns:
+                column_name = tcol["name"] if isinstance(tcol, dict) else tcol  # Handle both formats
+                if column_name.upper() in uppercase_source_columns:
+                    # Get the original case column name and its source
+                    original_col, source = uppercase_source_columns[column_name.upper()]
+                    st.session_state.column_mapping[column_name] = original_col
+            
+        if 'transformations' not in st.session_state:
+            st.session_state.transformations = {}
+        
+        st.write("Map each target column to a source column and specify any transformations:")
+        
+        mapping_cols = st.columns([1, 1, 2])
+        
+        with mapping_cols[0]:
+            st.write("**Target Column (Position)**")
+            for tcol in st.session_state.target_columns:
+                column_name = tcol["name"]
+                ordinal_position = tcol["position"]
+                st.markdown(f'<div class="target-column">{column_name} <span style="color: #606060;">(Pos: {ordinal_position})</span></div>', unsafe_allow_html=True)
+        
+        with mapping_cols[1]:
+            st.write("**Source Column**")
+            for i, tcol in enumerate(st.session_state.target_columns):
+                column_name = get_column_name(tcol)  
+                ordinal_position = tcol["position"] if isinstance(tcol, dict) and "position" in tcol else 0
+                key = f"mapping_{column_name}_{i}"
+                source_options = ["None"]
+                for column in all_source_columns:
+                    src_column_name = get_column_name(column)
+                    table_name = source_column_to_table.get(src_column_name, "Unknown")
+                    if src_column_name.startswith(f"{column_name}_"):
+                        source_options.append(f"{src_column_name} ({table_name})")
+                    else:
+                        source_options.append(f"{src_column_name} ({table_name})")
+        
+                
+                default_idx = 0
+                if column_name in st.session_state.column_mapping:
+                    mapped_col = st.session_state.column_mapping[column_name]
+                    mapped_col_name = get_column_name(mapped_col)
+                    for idx, option in enumerate(source_options):
+                        option_parts = option.split(" (")
+                        if option.startswith(f"{mapped_col} ("):
+                            default_idx = idx
+                            break
+                
+                selected_source_option = st.selectbox(
+                    f"Map to {column_name}",
+                    options=source_options,
+                    index=default_idx,
+                    key=key,
+                    label_visibility="collapsed"
+                )
+                
+                if selected_source_option != "None":
+                    selected_source = selected_source_option.split(" (")[0]
+                    if "_original_" + selected_source in source_column_to_table:
+                        original_column = source_column_to_table["_original_" + selected_source]
+                        st.session_state.column_mapping[column_name] = original_column
+                    else:
+                        st.session_state.column_mapping[column_name] = selected_source
+                elif column_name in st.session_state.column_mapping:
+                    del st.session_state.column_mapping[column_name]
+        
+        with mapping_cols[2]:
+            st.write("**Transformation (SQL)**")
+            for i, tcol in enumerate(st.session_state.target_columns):
+                column_name = tcol["name"]
+                key = f"transform_{column_name}_{i}"
+                previous_transform = st.session_state.transformations.get(column_name, "")
+                transformation = st.text_input(
+                    f"Transformation for {column_name}",
+                    value=previous_transform,
+                    key=key,
+                    placeholder="e.g., UPPER(col1) or col1 || ' ' || col2",
+                    label_visibility="collapsed"
+                )
+                
+                if transformation:
+                    st.session_state.transformations[column_name] = transformation
+                elif column_name in st.session_state.transformations:
+                    del st.session_state.transformations[column_name]
+        
+        if 'mapping_saved' not in st.session_state:
+            st.session_state.mapping_saved = False
+            
+        if st.button("Save Mapping"):
+            st.session_state.mapping_saved = True
+            st.success("Column mapping and transformations saved successfully!")
+        
+
+        st.markdown("---")
+        st.subheader(" Meta Data Table Details")
+
+        # Replace the table data creation part with this corrected version:
+        if st.session_state.mapping_saved:
+            # First, create data for regular column mappings
+            mapping_data = {
+                "Target Table": [],
+                "Source Table": [],
+                "Target Column": [],
+                "Source Column": [],
+                "Target Ordinal Position": [], 
+                "Join Condition": [],
+                "Transformation": []
+            }
+            
+            # Then create a separate data structure for join conditions
+            join_data = {
+                "Target Table": [],
+                "Source Table": [],
+                "Target Column": [],
+                "Source Column": [],
+                "Target Ordinal Position": [], 
+                "Join Condition": [],
+                "Transformation": []
+            }
+            
+            # Track which tables are joined
+            joined_tables = set(st.session_state.join_sources)
+            
+            # Process column mappings first
+            for tcol in st.session_state.target_columns:
+                column_name = tcol["name"]
+                ordinal_position = tcol["position"]
+                
+                if column_name in st.session_state.column_mapping:
+                    source_col = st.session_state.column_mapping[column_name]
+                    transform = st.session_state.transformations.get(column_name, "")
+                    
+                    # Find which source table this column belongs to
+                    source_table = ""
+                    source_table_full = ""
+                    for src, columns in st.session_state.join_source_columns.items():
+                        source_col_to_check = source_col["name"] if isinstance(source_col, dict) else source_col
+                        for col in columns:
+                            col_name = col["name"] if isinstance(col, dict) else col
+                            if source_col_to_check == col_name:
+                                source_table = src.split('.')[-1]  # Short name
+                                source_table_full = src            # Full name
+                                break
+                        if source_table:
+                            break
+                    
+                    if not source_table:
+                        source_table = "Unknown"
+                        source_table_full = "Unknown"
+                    
+                    # Add data to column mapping lists
+                    mapping_data["Target Table"].append(f"{st.session_state.selected_db}.{st.session_state.selected_schema}.{st.session_state.selected_table}")
+                    mapping_data["Source Table"].append(source_table_full)
+                    mapping_data["Target Column"].append(column_name)
+                    mapping_data["Source Column"].append("" if transform else source_col)
+                    mapping_data["Target Ordinal Position"].append(ordinal_position)
+                    mapping_data["Join Condition"].append("") 
+                    mapping_data["Transformation"].append(transform)
+            
+            # Now process join conditions separately
+            for source in st.session_state.join_sources:
+                if source in st.session_state.join_conditions:
+                    join_type = st.session_state.join_conditions[source].get('join_type', 'INNER JOIN')
+                    
+                    if st.session_state.join_conditions[source].get('manual_condition'):
+                        join_cond = f"{join_type} {source} ON {st.session_state.join_conditions[source]['manual_condition']}"
+                    else:
+                        conditions = []
+                        target_table_short = st.session_state.selected_table
+                        source_table_short = source.split('.')[-1]
+                        
+                        for t_col, s_col in zip(
+                            st.session_state.join_conditions[source]['target_columns'],
+                            st.session_state.join_conditions[source]['source_columns']
+                        ):
+                            conditions.append(f"{target_table_short}.{t_col} = {source_table_short}.{s_col}")
+                        
+                        if conditions:
+                            join_cond = f"{join_type} {source} ON {' AND '.join(conditions)}"
+                        else:
+                            continue
+                    
+                    # Add a row specifically for the join condition
+                    join_data["Target Table"].append(f"{st.session_state.selected_db}.{st.session_state.selected_schema}.{st.session_state.selected_table}")
+                    join_data["Source Table"].append("")  # Empty source table
+                    join_data["Target Column"].append("")  # Empty target column
+                    join_data["Source Column"].append("")  # Empty source column
+                    join_data["Target Ordinal Position"].append("")
+                    join_data["Join Condition"].append(join_cond)
+                    join_data["Transformation"].append("")  # Empty transformation
+            
+            # Combine the two datasets
+            combined_data = {
+                "Target Table": mapping_data["Target Table"] + join_data["Target Table"],
+                "Source Table": mapping_data["Source Table"] + join_data["Source Table"],
+                "Target Column": mapping_data["Target Column"] + join_data["Target Column"],
+                "Source Column": mapping_data["Source Column"] + join_data["Source Column"],
+                "Target Ordinal Position": mapping_data["Target Ordinal Position"] + join_data["Target Ordinal Position"],
+                "Join Condition": mapping_data["Join Condition"] + join_data["Join Condition"],
+                "Transformation": mapping_data["Transformation"] + join_data["Transformation"]
+            }
+            
+            # Create DataFrame and display
+            df = pd.DataFrame(combined_data)
+            st.table(df)
+
+        # Add this preview section HERE:
+        if st.session_state.mapping_saved:
+            st.markdown("---")
+            st.subheader("Preview Source Data")
+            
+            preview_query = generate_preview_query()
+            
+            if preview_query:
+                # st.markdown("##### Query to be executed:")
+                # st.code(preview_query, language="sql")
+                
+                if st.button("Load Sample Data"):
+                    with st.spinner("Fetching sample data..."):
+                        result_df, error = execute_preview_query(preview_query)
+                        
+                        if error:
+                            st.error(error)
+                        elif result_df is not None and not result_df.empty:
+                            st.markdown("##### Sample Data (10 rows):")
+                            st.dataframe(result_df)
+                        else:
+                            st.warning("No data returned from query.")
+            else:
+                st.info("Please map at least one column to view sample data.")
+        
+        if st.session_state.mapping_saved:
+            st.markdown("---")
+            st.subheader("Insert Mapping Data")
+            st.markdown('<div class="insert-button">', unsafe_allow_html=True)
+            if st.button("Insert Mapping Data"):
+                success, message = insert_mapping_data()
+                if success:
+                    st.session_state.insert_successful = True
+                    st.success(message)
+                else:
+                    st.error(message)
+            st.markdown('</div>', unsafe_allow_html=True)
+        else:
+            st.markdown("---")
+            st.info("Save mapping before inserting data")
+        
+        if st.session_state.insert_successful:
+            st.success("✅ Mapping data has been successfully inserted into the database!")
+
+# Footer
+st.markdown("---")
