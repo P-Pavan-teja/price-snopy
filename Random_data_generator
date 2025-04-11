@@ -1,0 +1,799 @@
+import streamlit as st
+from snowflake.snowpark.context import get_active_session
+import pandas as pd
+import random
+import string
+import datetime
+import json
+
+# Page configuration
+st.set_page_config(
+    page_title="Snowflake Random Data Generator",
+    page_icon=":game_die:",
+    layout="wide"
+)
+
+# App title and description
+st.title(":game_die: Snowflake Random Data Generator")
+st.markdown("Generate random data for any table in your Snowflake environment")
+
+# Define constants
+DATA_TYPES = [
+    "VARCHAR", "NUMBER", "INTEGER", "FLOAT", "DATE", "TIMESTAMP",
+    "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "BOOLEAN",
+    "VARIANT", "ARRAY", "OBJECT"
+]
+NULLABLE_OPTIONS = ["YES", "NO"]
+DEFAULT_LENGTH = 5
+
+# Helper function for generating random strings
+def random_string(length):
+    return ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(length))
+
+# Helper function for generating random dates
+def random_date():
+    start_date = datetime.date(2000, 1, 1)
+    end_date = datetime.date(2023, 12, 31)
+    delta = (end_date - start_date).days
+    random_days = random.randint(0, delta)
+    return (start_date + datetime.timedelta(days=random_days)).strftime('%Y-%m-%d')
+
+# Helper function for generating random timestamps
+def random_timestamp(with_tz=False):
+    start_date = datetime.datetime(2000, 1, 1, 0, 0, 0)
+    end_date = datetime.datetime(2023, 12, 31, 23, 59, 59)
+    delta = (end_date - start_date).total_seconds()
+    random_seconds = random.randint(0, int(delta))
+    
+    # Generate timestamp with proper format
+    dt = start_date + datetime.timedelta(seconds=random_seconds)
+    timestamp = dt.strftime('%Y-%m-%d %H:%M:%S')
+    
+    if with_tz:
+        timezone_offset = random.choice([-7, -5, 0, 1, 2, 5, 8])
+        sign = "+" if timezone_offset >= 0 else "-"
+        abs_offset = abs(timezone_offset)
+        return f"{timestamp} {sign}{abs_offset:02d}:00"
+    return timestamp
+
+# Function to generate random data based on Snowflake data type
+def generate_random_data(data_type, nullable=True, length=DEFAULT_LENGTH):
+    # Handle NULL values
+    if nullable and random.random() < 0.1:
+        return None
+    
+    # Ensure length is at least 1
+    length = max(1, length if length > 0 else DEFAULT_LENGTH)
+    
+    # Generate data based on type
+    if data_type == "VARCHAR":
+        return random_string(length)
+    
+    elif data_type == "NUMBER":
+        max_val = 10 ** length - 1
+        precision = random.randint(1, min(4, length))
+        return round(random.uniform(0, max_val), precision)
+    
+    elif data_type == "INTEGER":
+        max_val = 10 ** length - 1
+        return random.randint(0, max_val)
+    
+    elif data_type == "FLOAT":
+        return random.uniform(0, length * 100)
+    
+    elif data_type == "DATE":
+        return random_date()
+    
+    elif data_type in ["TIMESTAMP", "TIMESTAMP_NTZ"]:
+        return random_timestamp()
+    
+    elif data_type in ["TIMESTAMP_LTZ", "TIMESTAMP_TZ"]:
+        return random_timestamp(with_tz=True)
+    
+    elif data_type == "BOOLEAN":
+        return random.choice([True, False])
+    
+    elif data_type == "VARIANT":
+        result = {}
+        for _ in range(length):
+            key = random_string(5)
+            value_type = random.choice(["string", "number", "boolean"])
+            if value_type == "string":
+                result[key] = random_string(5)
+            elif value_type == "number":
+                result[key] = random.randint(1, 100)
+            else:
+                result[key] = random.choice([True, False])
+        return json.dumps(result)
+    
+    elif data_type == "ARRAY":
+        return json.dumps([random.randint(1, 100) for _ in range(length)])
+    
+    elif data_type == "OBJECT":
+        result = {}
+        for _ in range(length):
+            key = random_string(5)
+            nested = {}
+            for _ in range(random.randint(1, 2)):
+                nested_key = random_string(3)
+                nested[nested_key] = random.randint(1, 100)
+            result[key] = nested
+        return json.dumps(result)
+    
+    return "N/A"
+
+# Get DDL string for creating a table with specified columns
+def get_create_table_ddl(table_name, columns_config):
+    sql_parts = [f"CREATE OR REPLACE TABLE {table_name} ("]
+    
+    column_definitions = []
+    for col in columns_config:
+        col_name = col["name"]
+        data_type = col["type"]
+        nullable = col["nullable"]
+        length = col["length"]
+        
+        # Format column definition based on data type
+        if data_type == "VARCHAR":
+            # VARCHAR has a max of 16777216 in Snowflake
+            column_def = f"{col_name} VARCHAR({min(16777216, max(1, length * 100))})"
+        elif data_type == "NUMBER":
+            # NUMBER(precision, scale)
+            precision = min(38, max(length, 10))  # Max precision in Snowflake is 38
+            scale = min(precision - 1, 9)  # Scale should be less than precision
+            column_def = f"{col_name} NUMBER({precision},{scale})"
+        elif data_type == "INTEGER":
+            column_def = f"{col_name} INTEGER"
+        elif data_type == "FLOAT":
+            column_def = f"{col_name} FLOAT"
+        elif data_type == "DATE":
+            column_def = f"{col_name} DATE"
+        elif data_type == "TIMESTAMP":
+            column_def = f"{col_name} TIMESTAMP"
+        elif data_type == "TIMESTAMP_NTZ":
+            column_def = f"{col_name} TIMESTAMP_NTZ"
+        elif data_type == "TIMESTAMP_LTZ":
+            column_def = f"{col_name} TIMESTAMP_LTZ"
+        elif data_type == "TIMESTAMP_TZ":
+            column_def = f"{col_name} TIMESTAMP_TZ"
+        elif data_type == "BOOLEAN":
+            column_def = f"{col_name} BOOLEAN"
+        elif data_type == "VARIANT":
+            column_def = f"{col_name} VARIANT"
+        elif data_type == "ARRAY":
+            column_def = f"{col_name} ARRAY"
+        elif data_type == "OBJECT":
+            column_def = f"{col_name} OBJECT"
+        else:
+            # Default to VARCHAR for unknown types
+            column_def = f"{col_name} VARCHAR(16777216)"
+        
+        # Add NULL constraint if needed
+        if not nullable:
+            column_def += " NOT NULL"
+        
+        column_definitions.append(column_def)
+    
+    sql_parts.append(",\n  ".join(column_definitions))
+    sql_parts.append(");")
+    
+    return "\n  ".join(sql_parts)
+
+# Function to create a dropdown selector with placeholder
+def create_selector(label, options, placeholder, key):
+    full_options = [placeholder] + options
+    selected = st.selectbox(label, full_options, index=0, key=key)
+    return selected if selected != placeholder else None
+
+# Function to get object list from Snowflake
+def get_snowflake_objects(session, query):
+    try:
+        result_df = session.sql(query).collect()
+        return [row['name'] for row in result_df] if result_df else []
+    except Exception as e:
+        st.error(f"Error executing query: {e}")
+        return []
+
+# Function to check if two tables have compatible schemas
+def check_table_compatibility(session, source_columns, target_table):
+    try:
+        # Get target table columns
+        target_columns_df = session.sql(f"DESCRIBE TABLE {target_table}").collect()
+        target_column_names = [row['name'] for row in target_columns_df]
+        
+        # Get source column names
+        source_column_names = [col['name'] for col in source_columns]
+        
+        # Check if all source columns exist in target table
+        missing_columns = [col for col in source_column_names if col not in target_column_names]
+        
+        if missing_columns:
+            return False, f"Columns not found in target table: {', '.join(missing_columns)}"
+        
+        # Check data types - this is simplified and may need enhancement for strict type checking
+        for source_col in source_columns:
+            col_name = source_col['name']
+            source_type = source_col['type']
+            
+            # Find matching target column
+            target_col = next((row for row in target_columns_df if row['name'] == col_name), None)
+            if target_col:
+                target_type = str(target_col['type']).upper()
+                
+                # Basic type compatibility check
+                if source_type == "VARCHAR" and "CHAR" not in target_type and "STRING" not in target_type and "TEXT" not in target_type:
+                    return False, f"Column '{col_name}' type mismatch: {source_type} vs {target_type}"
+                elif source_type == "NUMBER" and "NUMBER" not in target_type and "DECIMAL" not in target_type and "NUMERIC" not in target_type:
+                    return False, f"Column '{col_name}' type mismatch: {source_type} vs {target_type}"
+                elif source_type == "INTEGER" and "INT" not in target_type:
+                    return False, f"Column '{col_name}' type mismatch: {source_type} vs {target_type}"
+                elif source_type == "FLOAT" and "FLOAT" not in target_type and "DOUBLE" not in target_type:
+                    return False, f"Column '{col_name}' type mismatch: {source_type} vs {target_type}"
+                elif source_type == "DATE" and "DATE" not in target_type:
+                    return False, f"Column '{col_name}' type mismatch: {source_type} vs {target_type}"
+                elif "TIMESTAMP" in source_type and "TIMESTAMP" not in target_type:
+                    return False, f"Column '{col_name}' type mismatch: {source_type} vs {target_type}"
+                elif source_type == "BOOLEAN" and "BOOL" not in target_type:
+                    return False, f"Column '{col_name}' type mismatch: {source_type} vs {target_type}"
+                elif source_type == "VARIANT" and "VARIANT" not in target_type:
+                    return False, f"Column '{col_name}' type mismatch: {source_type} vs {target_type}"
+                elif source_type == "ARRAY" and "ARRAY" not in target_type:
+                    return False, f"Column '{col_name}' type mismatch: {source_type} vs {target_type}"
+                elif source_type == "OBJECT" and "OBJECT" not in target_type:
+                    return False, f"Column '{col_name}' type mismatch: {source_type} vs {target_type}"
+        
+        return True, "Tables are compatible"
+    except Exception as e:
+        return False, f"Error checking compatibility: {str(e)}"
+
+# Function to map Snowflake data type to our type list
+def map_snowflake_type(data_type):
+    data_type_upper = data_type.upper()
+    
+    if any(t in data_type_upper for t in ["VARCHAR", "STRING", "TEXT", "CHAR"]):
+        return "VARCHAR"
+    elif "INT" in data_type_upper:
+        return "INTEGER"
+    elif any(t in data_type_upper for t in ["FLOAT", "DOUBLE"]):
+        return "FLOAT"
+    elif any(t in data_type_upper for t in ["NUMBER", "DECIMAL", "NUMERIC"]):
+        return "NUMBER"
+    elif "DATE" in data_type_upper and "TIME" not in data_type_upper:
+        return "DATE"
+    elif "TIMESTAMP_NTZ" in data_type_upper:
+        return "TIMESTAMP_NTZ"
+    elif "TIMESTAMP_LTZ" in data_type_upper:
+        return "TIMESTAMP_LTZ"
+    elif "TIMESTAMP_TZ" in data_type_upper:
+        return "TIMESTAMP_TZ"
+    elif "TIMESTAMP" in data_type_upper:
+        return "TIMESTAMP"
+    elif any(t in data_type_upper for t in ["BOOL", "BOOLEAN"]):
+        return "BOOLEAN"
+    elif "VARIANT" in data_type_upper:
+        return "VARIANT"
+    elif "ARRAY" in data_type_upper:
+        return "ARRAY"
+    elif "OBJECT" in data_type_upper:
+        return "OBJECT"
+    
+    # Default fallback
+    return "VARCHAR"
+
+# Initialize session state variables
+def init_session_state():
+    if 'selected_database' not in st.session_state:
+        st.session_state.selected_database = None
+    if 'selected_schema' not in st.session_state:
+        st.session_state.selected_schema = None
+    if 'selected_table' not in st.session_state:
+        st.session_state.selected_table = None
+    if 'num_records' not in st.session_state:
+        st.session_state.num_records = 100
+    if 'show_columns' not in st.session_state:
+        st.session_state.show_columns = False
+    if 'column_data_types' not in st.session_state:
+        st.session_state.column_data_types = {}
+    if 'column_nullable' not in st.session_state:
+        st.session_state.column_nullable = {}
+    if 'column_length' not in st.session_state:
+        st.session_state.column_length = {}
+    if 'generated_data' not in st.session_state:
+        st.session_state.generated_data = None
+    if 'insert_option' not in st.session_state:
+        st.session_state.insert_option = None
+    if 'new_table_name' not in st.session_state:
+        st.session_state.new_table_name = ""
+    if 'new_table_database' not in st.session_state:
+        st.session_state.new_table_database = None
+    if 'new_table_schema' not in st.session_state:
+        st.session_state.new_table_schema = None
+    if 'other_table_database' not in st.session_state:
+        st.session_state.other_table_database = None
+    if 'other_table_schema' not in st.session_state:
+        st.session_state.other_table_schema = None
+    if 'other_table_name' not in st.session_state:
+        st.session_state.other_table_name = None
+
+# Generate random data for all columns
+def generate_data_for_table(columns_config, num_records):
+    data = []
+    for i in range(num_records):
+        row_data = {}
+        for col in columns_config:
+            col_name = col["name"]
+            data_type = col["type"]
+            nullable = col["nullable"]
+            length = col["length"]
+            
+            row_data[col_name] = generate_random_data(data_type, nullable, length)
+        
+        data.append(row_data)
+    return data
+
+# Process columns for display and configuration
+def process_columns(columns_df):
+    display_data = []
+    
+    for row in columns_df:
+        try:
+            col_name = row['name']
+            data_type = row['type']
+            
+            # Determine nullability
+            is_nullable = True
+            if hasattr(row, 'null?'):
+                if "NOT NULL" in str(row['null?']).upper():
+                    is_nullable = False
+            
+            # Default values
+            nullable_default = "YES" if is_nullable else "NO"
+            
+            # Set defaults in session state if not already set
+            if col_name not in st.session_state.column_nullable:
+                st.session_state.column_nullable[col_name] = nullable_default
+            
+            if col_name not in st.session_state.column_length:
+                st.session_state.column_length[col_name] = DEFAULT_LENGTH
+            
+            # Determine suggested data type
+            suggested_type = map_snowflake_type(data_type)
+            
+            if col_name not in st.session_state.column_data_types:
+                st.session_state.column_data_types[col_name] = suggested_type
+            
+            # Add to display data
+            display_data.append({
+                "Column Name": col_name,
+                "Data Type": data_type,
+                "Nullable": st.session_state.column_nullable[col_name],
+                "Random Data Type": st.session_state.column_data_types[col_name],
+                "Length/Precision": st.session_state.column_length[col_name]
+            })
+        except Exception as e:
+            st.error(f"Error processing column {row.get('name', 'unknown')}: {e}")
+    
+    return display_data
+
+# Main application
+try:
+    # Get active Snowflake session
+    session = get_active_session()
+    st.success("Connected to Snowflake successfully!")
+    
+    # Initialize session state
+    init_session_state()
+    
+    # Get databases and create selector
+    database_names = get_snowflake_objects(session, "SHOW DATABASES")
+    selected_database = create_selector("Select Database", database_names, "-- Select a Database --", "database_selector")
+    
+    if selected_database:
+        st.session_state.selected_database = selected_database
+        
+        # Get schemas for selected database
+        schema_names = get_snowflake_objects(session, f"SHOW SCHEMAS IN DATABASE {selected_database}")
+        selected_schema = create_selector("Select Schema", schema_names, "-- Select a Schema --", "schema_selector")
+        
+        if selected_schema:
+            st.session_state.selected_schema = selected_schema
+            
+            # Get tables for selected schema
+            table_names = get_snowflake_objects(session, f"SHOW TABLES IN {selected_database}.{selected_schema}")
+            selected_table = create_selector("Select Table", table_names, "-- Select a Table --", "table_selector")
+            
+            if selected_table:
+                st.session_state.selected_table = selected_table
+                st.success(f"Selected: {selected_database}.{selected_schema}.{selected_table}")
+                
+                # View table columns
+                if st.button("View Table Columns") or st.session_state.show_columns:
+                    st.session_state.show_columns = True
+                    
+                    st.markdown("---")
+                    st.subheader(f"Columns in {selected_database}.{selected_schema}.{selected_table}")
+                    
+                    try:
+                        columns_df = session.sql(f"DESCRIBE TABLE {selected_database}.{selected_schema}.{selected_table}").collect()
+                        
+                        if columns_df:
+                            st.markdown("**Configure Random Data Generation Types**")
+                            
+                            # Process columns
+                            display_data = process_columns(columns_df)
+                            
+                            # Create data editor
+                            df = pd.DataFrame(display_data)
+                            edited_df = st.data_editor(
+                                df,
+                                column_config={
+                                    "Random Data Type": st.column_config.SelectboxColumn(
+                                        "Random Data Type",
+                                        help="Select the Snowflake data type for the random data",
+                                        width="medium",
+                                        options=DATA_TYPES,
+                                        required=True
+                                    ),
+                                    "Nullable": st.column_config.SelectboxColumn(
+                                        "Nullable",
+                                        help="Select whether this column can contain NULL values",
+                                        width="small",
+                                        options=NULLABLE_OPTIONS,
+                                        required=True
+                                    ),
+                                    "Length/Precision": st.column_config.NumberColumn(
+                                        "Length/Precision",
+                                        help="Specify length for VARCHAR, precision for NUMBER, etc.",
+                                        min_value=0,
+                                        max_value=1000,
+                                        step=1,
+                                        format="%d"
+                                    )
+                                },
+                                disabled=["Column Name", "Data Type"],
+                                hide_index=True,
+                                use_container_width=True,
+                                key="column_editor"
+                            )
+                            
+                            # Update session state
+                            columns_config = []
+                            for _, row in edited_df.iterrows():
+                                col_name = row['Column Name']
+                                data_type = row['Random Data Type']
+                                nullable = row['Nullable']
+                                length = row['Length/Precision']
+                                
+                                st.session_state.column_data_types[col_name] = data_type
+                                st.session_state.column_nullable[col_name] = nullable
+                                st.session_state.column_length[col_name] = length
+                                
+                                columns_config.append({
+                                    "name": col_name,
+                                    "type": data_type,
+                                    "nullable": nullable == "YES",
+                                    "length": length
+                                })
+                            
+                            st.session_state.columns_config = columns_config
+                            
+                            # Add info about length/precision field
+                            st.info("""
+                            **Length/Precision Field Usage:**
+                            - **VARCHAR**: Specifies the string length
+                            - **NUMBER/INTEGER/FLOAT**: Controls the max value range
+                            - **ARRAY**: Sets the number of elements
+                            - **VARIANT/OBJECT**: Determines the number of properties
+                            - For other types (DATE, TIMESTAMP, BOOLEAN), this field has no effect
+                            """)
+                            
+                            # Data generation section
+                            st.markdown("---")
+                            st.subheader("Generated Random Data")
+                            
+                            # Number of records input
+                            num_records = st.number_input("Number of Records to Generate", 
+                                                        min_value=1, 
+                                                        max_value=10000, 
+                                                        value=st.session_state.num_records)
+                            st.session_state.num_records = num_records
+                            
+                            # Generate data button
+                            if st.button("Generate Random Data", type="primary", key="generate_data_btn"):
+                                with st.spinner(f"Generating {num_records} records..."):
+                                    data = generate_data_for_table(columns_config, num_records)
+                                    st.session_state.generated_data = data
+                                
+                                st.success(f"Successfully generated {num_records} random records!")
+                            
+                            # Display generated data
+                            if st.session_state.generated_data:
+                                st.dataframe(pd.DataFrame(st.session_state.generated_data))
+                                
+                                # Download CSV button
+                                csv = pd.DataFrame(st.session_state.generated_data).to_csv(index=False).encode('utf-8')
+                                st.download_button(
+                                    label="Download Data as CSV",
+                                    data=csv,
+                                    file_name=f"random_data_{selected_table}.csv",
+                                    mime="text/csv",
+                                    key="download_csv"
+                                )
+                                
+                                # Data insertion options
+                                st.markdown("---")
+                                st.subheader("Insert Data Options")
+                                
+                                # Ask if user wants to insert data
+                                insert_option = st.radio(
+                                    "Would you like to insert this data into a table?",
+                                    options=["No", 
+                                             "Yes - Insert into same table", 
+                                             "Yes - Insert into a new table",
+                                             "Yes - Insert into another table"],
+                                    index=0,
+                                    key="insert_radio"
+                                )
+                                
+                                st.session_state.insert_option = insert_option
+                                
+                                if insert_option == "Yes - Insert into same table":
+                                    st.warning(f"This will insert {num_records} records into the existing table: {selected_database}.{selected_schema}.{selected_table}")
+                                    
+                                    if st.button("Confirm Insert into Existing Table", type="primary"):
+                                        try:
+                                            # Create a Snowpark DataFrame from the generated data
+                                            df = pd.DataFrame(st.session_state.generated_data)
+                                            snowpark_df = session.create_dataframe(df)
+                                            
+                                            # Write the data to the table
+                                            snowpark_df.write.mode("append").save_as_table(f"{selected_database}.{selected_schema}.{selected_table}")
+                                            
+                                            st.success(f"Successfully inserted {num_records} records into {selected_database}.{selected_schema}.{selected_table}")
+                                        except Exception as e:
+                                            st.error(f"Error inserting data: {e}")
+                                            st.code(str(e))
+                                
+                                elif insert_option == "Yes - Insert into a new table":
+                                    st.write("Select location for the new table:")
+                                    
+                                    # Create 3-column layout for database, schema, and table name
+                                    col1, col2, col3 = st.columns(3)
+                                    
+                                    with col1:
+                                        # Either use the same database from session state or let user select
+                                        new_db_options = ["Same as source"] + database_names
+                                        new_db_index = 0  # Default to "Same as source"
+                                        
+                                        new_db = st.selectbox(
+                                            "Database",
+                                            options=new_db_options,
+                                            index=new_db_index,
+                                            key="new_db_selector"
+                                        )
+                                        
+                                        if new_db == "Same as source":
+                                            new_database = selected_database
+                                        else:
+                                            new_database = new_db
+                                        
+                                        st.session_state.new_table_database = new_database
+                                    
+                                    with col2:
+                                        # Either use same schema or let user select
+                                        if new_database == selected_database:
+                                            # Get schemas for the selected database
+                                            new_schema_options = ["Same as source"] + schema_names
+                                            new_schema_index = 0  # Default to "Same as source"
+                                        else:
+                                            # Get schemas for the new database
+                                            new_schemas = get_snowflake_objects(session, f"SHOW SCHEMAS IN DATABASE {new_database}")
+                                            new_schema_options = new_schemas
+                                            new_schema_index = 0
+                                        
+                                        new_schema = st.selectbox(
+                                            "Schema",
+                                            options=new_schema_options,
+                                            index=new_schema_index,
+                                            key="new_schema_selector"
+                                        )
+                                        
+                                        if new_schema == "Same as source":
+                                            new_schema = selected_schema
+                                        
+                                        st.session_state.new_table_schema = new_schema
+                                    
+                                    with col3:
+                                        # Text input for table name
+                                        default_name = f"{selected_table}_COPY"
+                                        new_table_name = st.text_input(
+                                            "Table Name",
+                                            value=default_name,
+                                            key="new_table_input"
+                                        )
+                                        
+                                        st.session_state.new_table_name = new_table_name
+                                    
+                                    # Show full table path
+                                    if new_database and new_schema and new_table_name:
+                                        target_table = f"{new_database}.{new_schema}.{new_table_name}"
+                                        st.info(f"New table will be created as: {target_table}")
+                                        
+                                        # Generate CREATE TABLE DDL
+                                        create_table_ddl = get_create_table_ddl(target_table, columns_config)
+                                        
+                                        # Show the DDL with a toggle
+                                        with st.expander("Show CREATE TABLE statement"):
+                                            st.code(create_table_ddl, language="sql")
+                                        
+                                        if st.button("Create Table and Insert Data", type="primary"):
+                                            try:
+                                                # First, create the table with the correct data types
+                                                session.sql(create_table_ddl).collect()
+                                                
+                                                # Then, insert the data
+                                                df = pd.DataFrame(st.session_state.generated_data)
+                                                
+                                                # Convert data to match the target types
+                                                for col in columns_config:
+                                                    col_name = col["name"]
+                                                    
+                                                    # If column exists in the dataframe
+                                                    if col_name in df.columns:
+                                                        # For JSON types, ensure they're strings
+                                                        if col["type"] in ["VARIANT", "ARRAY", "OBJECT"]:
+                                                            df[col_name] = df[col_name].apply(
+                                                                lambda x: json.dumps(x) if x is not None and not isinstance(x, str) else x
+                                                            )
+                                                
+                                                # Create a temporary view
+                                                temp_view_name = f"TEMP_VIEW_{random.randint(100000, 999999)}"
+                                                snowpark_df = session.create_dataframe(df)
+                                                snowpark_df.create_or_replace_temp_view(temp_view_name)
+                                                
+                                                # Insert from the temp view into the new table
+                                                insert_sql = f"INSERT INTO {target_table} SELECT * FROM {temp_view_name}"
+                                                session.sql(insert_sql).collect()
+                                                
+                                                st.success(f"Successfully created table and inserted {num_records} records into {target_table}")
+                                            except Exception as e:
+                                                st.error(f"Error creating table and inserting data: {e}")
+                                                st.code(str(e))
+                                                
+                                                # Try to provide more details on what went wrong
+                                                st.info("Check the error message above. Common issues include incompatible data types or permissions.")
+
+
+                                elif insert_option == "Yes - Insert into another table":
+                                    st.write("Select an existing table to insert data into:")
+                                    
+                                    # Create 3-column layout for database, schema, and table selection
+                                    col1, col2, col3 = st.columns(3)
+                                    
+                                    with col1:
+                                        # Database selection for other table
+                                        other_db = st.selectbox(
+                                            "Database",
+                                            options=database_names,
+                                            index=database_names.index(selected_database) if selected_database in database_names else 0,
+                                            key="other_db_selector"
+                                        )
+                                        st.session_state.other_table_database = other_db
+                                    
+                                    with col2:
+                                        # Get schemas for the selected database
+                                        other_schemas = get_snowflake_objects(session, f"SHOW SCHEMAS IN DATABASE {other_db}")
+                                        
+                                        # Schema selection for other table
+                                        other_schema = st.selectbox(
+                                            "Schema",
+                                            options=other_schemas,
+                                            index=other_schemas.index(selected_schema) if selected_schema in other_schemas else 0,
+                                            key="other_schema_selector"
+                                        )
+                                        st.session_state.other_table_schema = other_schema
+                                    
+                                    with col3:
+                                        # Get tables for the selected schema
+                                        other_tables = get_snowflake_objects(session, f"SHOW TABLES IN {other_db}.{other_schema}")
+                                        
+                                        # Table selection for other table
+                                        other_table = st.selectbox(
+                                            "Table",
+                                            options=other_tables,
+                                            index=0,
+                                            key="other_table_selector"
+                                        )
+                                        st.session_state.other_table_name = other_table
+                                    
+                                    # Show full table path
+                                    if other_db and other_schema and other_table:
+                                        target_table = f"{other_db}.{other_schema}.{other_table}"
+                                        st.info(f"Data will be inserted into: {target_table}")
+                                        
+                                        # Check schema compatibility
+                                        compatibility, message = check_table_compatibility(session, columns_config, target_table)
+                                        
+                                        if compatibility:
+                                            st.success("✅ Tables are compatible for data insertion")
+                                            
+                                            if st.button("Insert Data into Selected Table", type="primary"):
+                                                try:
+                                                    # Create a Snowpark DataFrame from the generated data
+                                                    df = pd.DataFrame(st.session_state.generated_data)
+                                                    
+                                                    # Convert data to match the target types
+                                                    for col in columns_config:
+                                                        col_name = col["name"]
+                                                        
+                                                        # If column exists in the dataframe
+                                                        if col_name in df.columns:
+                                                            # For JSON types, ensure they're strings
+                                                            if col["type"] in ["VARIANT", "ARRAY", "OBJECT"]:
+                                                                df[col_name] = df[col_name].apply(
+                                                                    lambda x: json.dumps(x) if x is not None and not isinstance(x, str) else x
+                                                                )
+                                                    
+                                                    # Create a temporary view
+                                                    temp_view_name = f"TEMP_VIEW_{random.randint(100000, 999999)}"
+                                                    snowpark_df = session.create_dataframe(df)
+                                                    snowpark_df.create_or_replace_temp_view(temp_view_name)
+                                                    
+                                                    # Insert from the temp view into the target table
+                                                    insert_sql = f"INSERT INTO {target_table} SELECT * FROM {temp_view_name}"
+                                                    session.sql(insert_sql).collect()
+                                                    
+                                                    st.success(f"Successfully inserted {num_records} records into {target_table}")
+                                                except Exception as e:
+                                                    st.error(f"Error inserting data: {e}")
+                                                    st.code(str(e))
+                                        else:
+                                            st.error(f"❌ {message}")
+                                            st.warning("The source and target tables must have compatible schemas for insertion.")
+                                            
+                                            # Show column mapping
+                                            st.subheader("Column Mapping Analysis")
+                                            
+                                            # Get target table columns
+                                            target_columns_df = session.sql(f"DESCRIBE TABLE {target_table}").collect()
+                                            target_columns = []
+                                            
+                                            for row in target_columns_df:
+                                                target_columns.append({
+                                                    "Column Name": row['name'],
+                                                    "Data Type": row['type'],
+                                                    "Nullable": "YES" if "NOT NULL" not in str(row.get('null?', '')).upper() else "NO"
+                                                })
+                                            
+                                            # Source columns
+                                            source_columns = []
+                                            for col in columns_config:
+                                                source_columns.append({
+                                                    "Column Name": col['name'],
+                                                    "Data Type": col['type'],
+                                                    "Nullable": "YES" if col['nullable'] else "NO"
+                                                })
+                                            
+                                            # Display columns side by side
+                                            col1, col2 = st.columns(2)
+                                            
+                                            with col1:
+                                                st.write("Source Columns (Generated Data)")
+                                                st.dataframe(pd.DataFrame(source_columns))
+                                            
+                                            with col2:
+                                                st.write("Target Columns (Existing Table)")
+                                                st.dataframe(pd.DataFrame(target_columns))
+                        else:
+                            st.warning("This table has no columns available.")
+                    except Exception as e:
+                        st.error(f"Error retrieving columns: {e}")
+                        st.code(str(e))
+
+except Exception as e:
+    st.error(f"Error connecting to Snowflake: {e}")
+    st.info("This application must be run within Snowflake Streamlit.")
+
+# Footer
+st.markdown("---")
+st.markdown("© 2025 Snowflake Random Data Generator")
