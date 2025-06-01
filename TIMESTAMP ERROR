@@ -20,6 +20,37 @@ COALESCE(
 )
 $$;
 
+
+
+
+CREATE OR REPLACE FUNCTION CONVERT_TO_STANDARD_TIMESTAMP(input_value VARCHAR)
+RETURNS VARCHAR
+AS
+$$
+COALESCE(
+  TO_CHAR(
+    COALESCE(
+      TRY_TO_TIMESTAMP(input_value, 'YYYY-MM-DD HH24:MI:SS:FF9'),
+      TRY_TO_TIMESTAMP(input_value, 'YYYY/MM/DD HH24:MI:SS:FF9'),
+      TRY_TO_TIMESTAMP(input_value, 'DD-MM-YYYY HH24:MI:SS:FF9'),
+      TRY_TO_TIMESTAMP(input_value, 'MM-DD-YYYY HH24:MI:SS:FF9'),
+      TRY_TO_TIMESTAMP(input_value, 'YYYY-MM-DD HH24:MI:SS:FF9'),
+      TRY_TO_TIMESTAMP(input_value, 'YYYY/MM/DD HH24.MI.SS.FF9'),
+      TRY_TO_TIMESTAMP(input_value, 'YYYY-MM-DD-HH24.MI.SS.FF9'),
+      TRY_TO_TIMESTAMP(input_value, 'YYYY-DD-MM HH24:MI:SS:FF9')
+    ), 
+    'YYYY-MM-DD HH24:MI:SS.FF3'
+  ),
+  input_value  -- Return original value if conversion fails
+)
+$$;
+
+      -- TRY_TO_TIMESTAMP(SUBSTR(input_value, 1, 10) || ' ' || REPLACE(SUBSTR(input_value, 12), '.', ':'), 'YYYY-MM-DD HH24:MI:SS:FF9'),
+
+      --       TRY_TO_TIMESTAMP(SUBSTR(input_value, 1, 4) || '-' || SUBSTR(input_value, 9, 2) || '-' || SUBSTR(input_value, 6, 2) || SUBSTR(input_value, 11), 'YYYY-MM-DD HH24:MI:SS:FF3')
+      
+
+
 -- Test Case 1: YYYY-MM-DD HH:MM:SS:FF9
 SELECT 
   'Format 1' AS test_case,
