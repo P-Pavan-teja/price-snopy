@@ -1,0 +1,236 @@
+import streamlit as st
+from snowflake.snowpark import Session
+import pandas as pd
+import os
+from snowflake.snowpark.context import get_active_session
+
+# Set page config
+st.set_page_config(page_title="Masking Master Data Entry", layout="wide")
+
+# App title and description
+st.title("Insert Masking Master Data")
+st.write("Add new records to the MASKING_MASTER_INFO table")
+
+# Initialize session state variables if they don't exist
+if "masking_data" not in st.session_state:
+    st.session_state.masking_data = None
+
+# Get active Snowflake session
+session = get_active_session()
+
+# Function to run a query
+def run_query(query):
+    try:
+        result = session.sql(query).collect()
+        return pd.DataFrame(result)
+    except Exception as e:
+        st.error(f"Query Error: {str(e)}")
+        return None
+
+# Function to insert data into MASKING_MASTER_INFO table using custom logic
+def insert_masking_data(df):
+    try:
+        # Filter to only the columns we want to insert
+        columns_to_insert = ['DATABASE_NAME', 'SCHEMA_NAME', 'TABLE_NAME', 'COLUMN_NAME', 'CLASSIFICATION_NAME']
+        df_filtered = df[columns_to_insert].copy()
+        
+        # Remove empty rows
+        df_filtered = df_filtered.dropna(how='all')
+        
+        if df_filtered.empty:
+            st.warning("No data to insert. Please add some data first.")
+            return False
+        
+        # Convert dataframe rows to VALUES clause
+        values_list = []
+        for _, row in df_filtered.iterrows():
+            values_tuple = f"('{row['DATABASE_NAME']}','{row['SCHEMA_NAME']}','{row['TABLE_NAME']}','{row['COLUMN_NAME']}','{row['CLASSIFICATION_NAME']}')"
+            values_list.append(values_tuple)
+        
+        values_clause = ',\n'.join(values_list)
+        
+        # Build the complete INSERT statement
+        insert_query = f"""
+INSERT INTO COMMON_DB.UTIL_SCH.MASKING_MASTER_INFO ( 
+    DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, COLUMN_NAME, CLASSIFICATION_NAME, 
+    POLICY_NAME, MASKING_STATUS, USER_REQUESTED
+)
+SELECT 
+    DATA.DATABASE_NAME, DATA.SCHEMA_NAME, DATA.TABLE_NAME, 
+    DATA.COLUMN_NAME, DATA.CLASSIFICATION_NAME,
+    CASE WHEN UPPER(DATA.CLASSIFICATION_NAME) IN ('PII','RESTRICTED','CONFIDENTIAL','PHI')
+        THEN 'SENSITIVE' 
+        WHEN UPPER(DATA.CLASSIFICATION_NAME) IN ('ELEVATED')
+        THEN 'ELEVATED'
+    ELSE 'NO_POLICY_TO_APPLY' END AS POLICY_NAME,
+    CASE WHEN (CASE WHEN UPPER(DATA.CLASSIFICATION_NAME) IN ('PII','RESTRICTED','CONFIDENTIAL','PHI')
+                    THEN 'SENSITIVE' 
+                    WHEN UPPER(DATA.CLASSIFICATION_NAME) IN ('ELEVATED')
+                    THEN 'ELEVATED'
+                ELSE 'NO_POLICY_TO_APPLY' END) = 'NO_POLICY_TO_APPLY' 
+         THEN 'NO_POLICY_TO_APPLY'
+         WHEN EXISTS(
+            SELECT 1 FROM COMMON_DB.UTIL_SCH.MASKING_MASTER_INFO MM
+            WHERE MM.DATABASE_NAME = DATA.DATABASE_NAME
+                AND MM.SCHEMA_NAME = DATA.SCHEMA_NAME
+                AND MM.TABLE_NAME = DATA.TABLE_NAME
+                AND MM.COLUMN_NAME = DATA.COLUMN_NAME
+                AND MM.CLASSIFICATION_NAME = DATA.CLASSIFICATION_NAME
+                AND MM.DELETED_TIME IS NULL
+        ) THEN 'ALREADY_APPLIED' 
+        ELSE 'NEED_TO_APPLY' END AS MASKING_STATUS,
+    CURRENT_USER() AS USER_REQUESTED
+FROM VALUES
+{values_clause}
+AS DATA ( DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, COLUMN_NAME, CLASSIFICATION_NAME)
+"""
+        
+        # Execute the insert statement
+        session.sql(insert_query).collect()
+        return True
+        
+    except Exception as e:
+        st.error(f"Error inserting data: {str(e)}")
+        # Show the query for debugging if needed
+        if st.checkbox("Show generated query for debugging"):
+            st.code(insert_query, language="sql")
+        return False
+
+
+
+st.write("### Enter New Masking Configuration Data")
+
+# Define the columns we want to collect
+columns_to_collect = [
+    'DATABASE_NAME',
+    'SCHEMA_NAME', 
+    'TABLE_NAME',
+    'COLUMN_NAME',
+    'CLASSIFICATION_NAME'
+]
+
+# Create an empty dataframe with only the columns we need
+empty_df = pd.DataFrame(columns=columns_to_collect)
+
+# Add some helpful information
+st.info("""
+**Instructions:**
+- Fill in the required columns for masking configuration
+- DATABASE_NAME: Name of the database
+- SCHEMA_NAME: Name of the schema
+- TABLE_NAME: Name of the table
+- COLUMN_NAME: Name of the column to be masked
+- CLASSIFICATION_NAME: Classification type for the column
+- Click the '+' button to add new rows
+- ID and timestamps will be automatically generated
+""")
+
+# Create an editable data table
+edited_data = st.data_editor(
+    empty_df,
+    num_rows="dynamic",
+    use_container_width=True,
+    key="masking_data_editor",
+    column_config={
+        "DATABASE_NAME": st.column_config.TextColumn(
+            "Database Name",
+            help="Name of the database",
+            max_chars=100,
+            required=True
+        ),
+        "SCHEMA_NAME": st.column_config.TextColumn(
+            "Schema Name", 
+            help="Name of the schema",
+            max_chars=100,
+            required=True
+        ),
+        "TABLE_NAME": st.column_config.TextColumn(
+            "Table Name",
+            help="Name of the table", 
+            max_chars=500,
+            required=True
+        ),
+        "COLUMN_NAME": st.column_config.TextColumn(
+            "Column Name",
+            help="Name of the column to be masked",
+            max_chars=500,
+            required=True
+        ),
+        "CLASSIFICATION_NAME": st.column_config.TextColumn(
+            "Classification Name",
+            help="Classification type (e.g., PII, SENSITIVE, etc.)",
+            max_chars=500,
+            required=True
+        )
+    }
+)
+
+# Store the edited data in session state
+st.session_state.masking_data = edited_data
+
+# Add validation and save functionality
+col1, col2, col3 = st.columns([1, 1, 2])
+
+with col1:
+    if st.button("Validate Data", type="secondary"):
+        if not edited_data.empty:
+            # Check for required fields
+            missing_data = False
+            for col in columns_to_collect:
+                if edited_data[col].isna().any() or (edited_data[col] == '').any():
+                    st.error(f"Missing data in column: {col}")
+                    missing_data = True
+            
+            if not missing_data:
+                st.success("✅ Data validation passed!")
+                # Show preview of data to be inserted
+                st.write("**Data to be inserted:**")
+                st.dataframe(edited_data, use_container_width=True)
+        else:
+            st.warning("No data to validate. Please add some data first.")
+
+with col2:
+    if st.button("Insert Data", type="primary"):
+        if not edited_data.empty:
+            # Validate data before inserting
+            valid_data = True
+            for col in columns_to_collect:
+                if edited_data[col].isna().any() or (edited_data[col] == '').any():
+                    st.error(f"Cannot insert: Missing data in column {col}")
+                    valid_data = False
+                    break
+            
+            if valid_data:
+                if insert_masking_data(edited_data):
+                    st.success("🎉 Data inserted successfully!")
+                    st.balloons()
+                    # Clear the editor after successful insert
+                    st.rerun()
+            else:
+                st.error("Please fix validation errors before inserting.")
+        else:
+            st.warning("No data to insert. Please add some data first.")
+
+with col3:
+    if st.button("Clear All Data"):
+        st.rerun()
+            
+    else:
+        st.info("No data found in MASKING_MASTER_INFO table or unable to fetch data.")
+
+# Add footer with additional information
+st.markdown("---")
+st.markdown("""
+**Note:** 
+- ID will be auto-generated using the sequence COMMON_DB.UTIL_SCH.ID_SEQUENCE.NEXTVAL
+- INSERT_TIME will be automatically set to CURRENT_TIMESTAMP()
+- POLICY_NAME will be automatically determined based on CLASSIFICATION_NAME:
+  - 'PII', 'RESTRICTED', 'CONFIDENTIAL', 'PHI' → 'SENSITIVE'
+  - 'ELEVATED' → 'ELEVATED' 
+  - Others → 'NO_POLICY_TO_APPLY'
+- MASKING_STATUS will be automatically set based on existing records:
+  - 'NO_POLICY_TO_APPLY' if no policy applies
+  - 'ALREADY_APPLIED' if record already exists
+  - 'NEED_TO_APPLY' for new records that need masking
+- USER_REQUESTED will be set to CURRENT_USER()
+""")
