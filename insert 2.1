@@ -1,0 +1,37 @@
+import streamlit as st
+from snowflake.snowpark.context import get_active_session
+import pandas as pd
+
+st.title("Insert Masking Master Data")
+session = get_active_session()
+
+def insert_data(df):
+    try:
+        df = df.dropna(how='all')
+        if df.empty: return False
+        
+        values = ','.join([f"('{r['DATABASE_NAME']}','{r['SCHEMA_NAME']}','{r['TABLE_NAME']}','{r['COLUMN_NAME']}','{r['CLASSIFICATION_NAME']}')" for _, r in df.iterrows()])
+        
+        query = f"""INSERT INTO COMMON_DB.UTIL_SCH.MASKING_MASTER_INFO (DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, COLUMN_NAME, CLASSIFICATION_NAME, POLICY_NAME, MASKING_STATUS, USER_REQUESTED)
+SELECT DATA.DATABASE_NAME, DATA.SCHEMA_NAME, DATA.TABLE_NAME, DATA.COLUMN_NAME, DATA.CLASSIFICATION_NAME,
+CASE WHEN UPPER(DATA.CLASSIFICATION_NAME) IN ('PII','RESTRICTED','CONFIDENTIAL','PHI') THEN 'SENSITIVE' 
+     WHEN UPPER(DATA.CLASSIFICATION_NAME) IN ('ELEVATED') THEN 'ELEVATED' ELSE 'NO_POLICY_TO_APPLY' END,
+CASE WHEN (CASE WHEN UPPER(DATA.CLASSIFICATION_NAME) IN ('PII','RESTRICTED','CONFIDENTIAL','PHI') THEN 'SENSITIVE' 
+                WHEN UPPER(DATA.CLASSIFICATION_NAME) IN ('ELEVATED') THEN 'ELEVATED' ELSE 'NO_POLICY_TO_APPLY' END) = 'NO_POLICY_TO_APPLY' THEN 'NO_POLICY_TO_APPLY'
+     WHEN EXISTS(SELECT 1 FROM COMMON_DB.UTIL_SCH.MASKING_MASTER_INFO MM WHERE MM.DATABASE_NAME = DATA.DATABASE_NAME AND MM.SCHEMA_NAME = DATA.SCHEMA_NAME AND MM.TABLE_NAME = DATA.TABLE_NAME AND MM.COLUMN_NAME = DATA.COLUMN_NAME AND MM.CLASSIFICATION_NAME = DATA.CLASSIFICATION_NAME AND MM.DELETED_TIME IS NULL) THEN 'ALREADY_APPLIED' ELSE 'NEED_TO_APPLY' END,
+CURRENT_USER() FROM VALUES {values} AS DATA (DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, COLUMN_NAME, CLASSIFICATION_NAME)"""
+        
+        session.sql(query).collect()
+        return True
+    except Exception as e:
+        st.error(f"Error: {e}")
+        return False
+
+data = st.data_editor(pd.DataFrame(columns=['DATABASE_NAME', 'SCHEMA_NAME', 'TABLE_NAME', 'COLUMN_NAME', 'CLASSIFICATION_NAME']), num_rows="dynamic", use_container_width=True)
+
+if st.button("Insert Data"):
+    if not data.empty and all(not data[col].isna().any() and not (data[col] == '').any() for col in data.columns):
+        if insert_data(data):
+            st.success("Data inserted successfully!")
+    else:
+        st.warning("Please fill all required fields.")
