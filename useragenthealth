@@ -1,0 +1,11 @@
+Set wsc = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+t0 = Timer
+
+Do
+    If fso.FileExists("C:\Users\Public\stop_keepalive.txt") Or (Timer - t0 >= 7200) Then WScript.Quit
+    WScript.Sleep (Int(Rnd * 31 + 30) * 1000)
+    wsc.SendKeys "{NUMLOCK}"
+    WScript.Sleep 200
+    wsc.SendKeys "{NUMLOCK}"
+Loop
