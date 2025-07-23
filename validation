@@ -1,0 +1,267 @@
+import awswrangler as wr
+import boto3
+import csv
+import traceback
+import pandas as pd
+from common import *
+from datetime import datetime
+from pytz import timezone
+import warnings
+
+warnings.simplefilter("ignore", UserWarning)
+
+s3 = boto3.resource('s3')
+client_s3 = boto3.client('s3')
+
+source_cnt = 0
+target_cnt = 0
+count = 0
+skip_cnt = 0
+skip_out_cnt = 0
+skip_spl_cnt = 0
+
+errors = []
+failed_filenames = []
+# ADDED: Store detailed error info
+file_errors = {}
+param_input_path = ''
+s3_input_path = ''
+param_load_category = ''
+param_task_flowname = ''
+
+tz = timezone('US/Eastern')
+startdt = datetime.now(tz)
+load_date = startdt.date().isoformat()
+format_snap_date = load_date
+
+
+def log_message(error_message: str,
+                status: str = '3',
+                tgtfilename: str = 'None',
+                src_cnt: int = 0,
+                tgt_cnt: int = 0,
+                format_snap_date: str = '',
+                srcfilename: str = '',
+                starttime: str = '',
+                task_name: str = '',
+                skipped_cnt: int = 0
+                ):
+    """
+    The below code will write the success and failure error message.
+    :param error_message: description of the error
+    :param tgtfilename: Target name folder
+    :param src_cnt: Number of Source files
+    :param tgt_cnt: Number of Target files
+    :param status: 1 (success) 0r 3 (failure)
+    :param format_snap_date: The process date of the Source file
+    :param srcfilename: The name of the Source file
+    :param starttime: The start time of the job
+    :param task_name: The name of the ETL task name
+    :param skipped_cnt: Number of Out of Scope files
+    :return: None
+    """
+    tz = timezone('US/Eastern')
+    enddt = datetime.now(tz)
+    endtime = enddt.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    error_details = {
+        'JOB_ID': job_id,
+        'LOAD_DATE': load_date,
+        'LOAD_DATA_CATEGORY': f'{param_load_category}Validation (Trailer)',
+        'TASKFLOW_NAME': param_task_flowname,
+        'ACCOUNTING_DATE': format_snap_date,
+        'SOURCE_NAME': srcfilename,
+        'TARGET_NAME': tgtfilename,
+        'TOTAL_RECORDS_SOURCE': src_cnt,
+        'TOTAL_RECORDS_TARGET': tgt_cnt,
+        'TOTAL_RECORDS_SKIPPED': skipped_cnt,
+        'STARTTIME_EST': starttime,
+        'ENDTIME_EST': endtime,
+        'TASKFLOW_STATUS': status,
+        'ERROR_MSG': error_message,
+        'ETL_USER': task_name,
+        'SOURCE_FREQ': 'DAILY'
+    }
+
+    errors.append(error_details)
+
+
+def validate_trailer(src_sep: str = ',',
+                     file_name: str = '',
+                     specialfilenames: str = '',
+                     error_desc: str = ''):
+    """
+    Compare total count of records between source dataframe and grand total trailing record
+
+    :param src_sep: delimeter
+    :param file_name: name of the file
+    :param specialfilenames: contains large data to process
+    :return: None
+    """
+    # Header has 3 columns and Trailer has 4 columns for CurrenyCode File so I added Trailer_count field to resolve the issue
+    try:
+        #if ('ExtCurrencyCodes' in file_name):
+            #src_df = pd.read_csv(file_name, sep=src_sep, names=['H', 'CurrencyCode', 'Precision', 'Trailer_Count'],
+                                 #engine='python')
+        if (specialfilenames in file_name) and specialfilenames != '':
+            # The Amount csv file might contain very huge fields, therefore increase the field_size_limit
+            maxInt = sys.maxsize
+
+            while True:
+                # decrease the maxInt value by factor 10
+                # as long as the OverflowError occurs.
+
+                try:
+                    csv.field_size_limit(maxInt)
+                    break
+                except OverflowError:
+                    maxInt = int(maxInt / 10)
+            src_df = wr.s3.read_csv(file_name, sep=src_sep, dtype=str)
+        else:
+            # default it back to Original Count
+            csv.field_size_limit(131072)
+            src_df = wr.s3.read_csv(file_name, sep=src_sep, encoding='utf-8', engine='python')
+
+        input_row_count = len(src_df) + 1  # header
+        trailer_df = src_df.tail(1)
+        # Trailer count is exist in the fourth column
+        var = trailer_df.iloc[:, [3]].values[0]
+        trailer_row_count = int(var[0])
+        # Process date is exist in the third column
+        process_date = trailer_df.iloc[:, [2]].values[0]
+        # remove underscores from process_date
+        process_date_re = str(process_date)[2:-2].replace('-', '')
+        
+        # CHANGED: Collect errors instead of immediate abort
+        error_parts = []
+        if process_date_re != str(account_date):
+            error_parts.append(f"date {process_date_re}||{account_date}")
+        if trailer_row_count != input_row_count:
+            error_parts.append(f"counts {trailer_row_count}||{input_row_count}")
+        
+        if error_parts:
+            failed_filenames.append(file_name)
+            file_errors[file_name] = " | ".join(error_parts)
+
+    except Exception as trailer_ex:
+        trailer_ex_desc = repr(trailer_ex)
+        trailer_ex_stacktrace = traceback.format_exc()
+        # CHANGED: Collect error instead of abort
+        failed_filenames.append(file_name)
+        file_errors[file_name] = f"runtime_error: {str(trailer_ex)[:30]}..."
+        # REMOVED: abort_script call
+
+
+if __name__ == "__main__":
+    try:
+        starttime = startdt.strftime('%Y-%m-%dT%H:%M:%SZ')
+        bucket_name = sys.argv[1]
+        job_id = sys.argv[2]
+        task_name = sys.argv[3]
+        param_file = sys.argv[4]
+        error_desc = ''
+
+        # Reading Param file in S3
+        (param_input_path,
+         param_input_path_fileprefix,
+         param_expected_files,
+         param_reject_path,
+         param_output_path,
+         param_load_category,
+         param_task_flowname,
+         param_archive_path,
+         param_trailer_processdt_location,
+         param_filedelimiter,
+         param_specialfilenames,
+         param_trailer_grandtotal_location,
+         param_specialfiledelimiter,
+         param_outofscopetrailerfiles,
+         param_trailer_consolidation) = extract_param_value(bucket_name, param_file)
+
+        if len(list(param_outofscopetrailerfiles.split("|"))) >= 2:
+            outofscopetrailerfiles = list(param_outofscopetrailerfiles.split("|"))
+        else:
+            outofscopetrailerfiles = param_outofscopetrailerfiles
+
+        if len(list(param_specialfilenames.split("|"))) >= 2:
+            specialfilenames = list(param_specialfilenames.split("|"))
+        else:
+            specialfilenames = param_specialfilenames
+
+        s3_input_path = f'{param_output_path}Processedfiles/'
+
+        s3_results = wr.s3.list_objects('s3://' + bucket_name + '/' + s3_input_path)
+        source_cnt = len(s3_results)
+        if len(s3_results) == 0:
+            error_desc = f'ERROR: No files found in processed folder:{s3_input_path}'
+            log_message(error_desc, '3', s3_input_path, 0, 0, format_snap_date, s3_input_path, starttime, task_name, skip_cnt)
+            abort_script(error_desc)
+
+        account_date, process_date, zipfilename = cycle_date(param_input_path_fileprefix, bucket_name)
+        if account_date == '':
+            error_desc = f'ERROR: zip file is missing or invalid:{param_input_path_fileprefix}'
+            log_message(error_desc, '3', param_input_path_fileprefix, 0, 0, format_snap_date, '', starttime, task_name, skip_cnt)
+            abort_script(error_desc)
+        format_snap_date = datetime.strptime(account_date, '%Y%m%d').date().isoformat()
+
+        for filename in s3_results:
+            file_name = filename.rsplit('/', 2)[-1]
+            file_path = s3_input_path + filename
+            out_flag = 'T'
+            special_flag = 'F'
+
+            if isinstance(outofscopetrailerfiles, list):
+                for outfilename in outofscopetrailerfiles:
+                    if outfilename in file_name and param_filedelimiter == '"|"':
+                        skip_out_cnt += 1
+                        out_flag = 'F'
+            elif f'{outofscopetrailerfiles}' in file_name and param_filedelimiter == '"|"':
+                skip_out_cnt = 1
+                out_flag = 'F'
+
+            if isinstance(specialfilenames, list):
+                for specialfilename in specialfilenames:
+                    if specialfilename in file_name and param_specialfiledelimiter == '|':
+                        skip_spl_cnt += 1
+                        special_flag = 'T'
+            elif f'{specialfilenames}' in file_name and param_specialfiledelimiter == '|':
+                skip_spl_cnt = 1
+                special_flag = 'T'
+
+            if out_flag == 'T':
+                src_sep = '\"\|\"'
+                validate_trailer(src_sep, filename, param_specialfilenames)
+
+            if special_flag == 'T' and out_flag == 'F':
+                validate_trailer(param_specialfiledelimiter, filename, param_specialfilenames)
+
+            if filename[-1] != '/' or out_flag == 'F':
+                count += 1
+                target_cnt = count
+
+        skipped_cnt = skip_out_cnt - skip_spl_cnt
+
+        # CHANGED: Check collected errors at end
+        if len(failed_filenames) >= 1:
+            failed_filenames = list(set(failed_filenames))
+            error_lines = [f"{f}: {file_errors[f]}" for f in failed_filenames if f in file_errors]
+            error_desc = f'ERROR: Trailer validation failed on {len(failed_filenames)} files:\n' + '\n'.join(error_lines)
+            target_cnt = target_cnt - len(failed_filenames)
+            log_message(error_desc, '3', s3_input_path, source_cnt, target_cnt, format_snap_date, s3_input_path,
+                        starttime, task_name, skipped_cnt)
+            abort_script(error_desc)
+
+        else:
+            msg = f'INFO: Trailer validation for the {format_snap_date} was successful'
+            log_message(msg, '1', s3_input_path, source_cnt, target_cnt, format_snap_date, s3_input_path, starttime,
+                        task_name, skipped_cnt)
+
+    except Exception as ex:
+        ex_desc = repr(ex)
+        ex_stacktrace = traceback.format_exc()
+        if error_desc == '':
+            error_desc = f'RUNTIME_ERROR: Error occurred during execution. See full error below\n\n' \
+                         f'Exception: {ex_desc}\n\n{ex_stacktrace}'
+            log_message(error_desc, '3', s3_input_path, source_cnt, target_cnt, format_snap_date, s3_input_path,
+                        starttime, task_name, skip_cnt)
+        abort_script(error_desc)
