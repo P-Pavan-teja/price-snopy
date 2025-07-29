@@ -1,0 +1,40 @@
+import boto3
+import re
+
+# --- Configuration ---
+input_bucket = 'your-input-bucket-name'
+output_bucket = 'your-output-bucket-name'
+input_key = 'path/to/input.txt'
+output_key = 'path/to/cleaned_output.txt'
+
+# --- Read raw content from S3 ---
+s3 = boto3.client('s3')
+body = s3.get_object(Bucket=input_bucket, Key=input_key)['Body'].read().decode('utf-8')
+
+# --- Step 1: Flatten all line breaks ---
+flat = re.sub(r'[\r\n]+', ' ', body)
+
+# --- Step 2: Extract components using regex ---
+header_match = re.search(r'H"\|.*?(?=D"\|)', flat)
+trailer_match = re.search(r'T"\|.*$', flat)
+data_records = re.findall(r'D"\|.*?(?=D"\||T"\||$)', flat)
+
+# --- Step 3: Preserve formatting — no quote stripping ---
+header = header_match.group(0).strip() if header_match else ''
+trailer = trailer_match.group(0).strip() if trailer_match else ''
+records = [rec.strip() for rec in data_records]
+
+# --- Step 4: Assemble clean output ---
+final_output_lines = []
+if header:
+    final_output_lines.append(header)
+final_output_lines.extend(records)
+if trailer:
+    final_output_lines.append(trailer)
+
+# --- Step 5: Write cleaned output to S3 ---
+s3.put_object(
+    Bucket=output_bucket,
+    Key=output_key,
+    Body='\n'.join(final_output_lines).encode('utf-8')
+)
