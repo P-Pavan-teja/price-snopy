@@ -38,3 +38,68 @@ s3.put_object(
     Key=output_key,
     Body='\n'.join(final_output_lines).encode('utf-8')
 )
+
+import boto3
+import re
+
+# --- Config ---
+input_bucket = 'your-input-bucket-name'
+output_bucket = 'your-output-bucket-name'
+input_key = 'path/to/input.txt'
+output_key = 'path/to/cleaned_output.txt'
+
+# --- Safe D"| splitter with ASCII quotes ---
+def split_d_records_ascii(flat: str) -> list:
+    records = []
+    i = 0
+    inside_quote = False
+    current = ''
+    while i < len(flat):
+        if flat[i] == '"':
+            inside_quote = not inside_quote
+            current += flat[i]
+            i += 1
+            continue
+        if not inside_quote and flat[i:i+3] == 'D"|':
+            if current:
+                records.append(current.strip())
+            current = 'D"|'
+            i += 3
+        else:
+            current += flat[i]
+            i += 1
+    if current:
+        records.append(current.strip())
+    return records
+
+# --- S3 Read ---
+s3 = boto3.client('s3')
+body = s3.get_object(Bucket=input_bucket, Key=input_key)['Body'].read().decode('utf-8')
+
+# --- Flatten newlines ---
+flat = re.sub(r'[\r\n]+', ' ', body)
+
+# --- Extract header & trailer ---
+header_match = re.search(r'H"\|.*?(?=D"\|)', flat)
+trailer_match = re.search(r'T"\|.*$', flat)
+
+header = header_match.group(0).strip() if header_match else ''
+trailer = trailer_match.group(0).strip() if trailer_match else ''
+
+# --- Extract data records (safe split) ---
+records = split_d_records_ascii(flat)
+
+# --- Final output
+final_lines = []
+if header:
+    final_lines.append(header)
+final_lines.extend(records)
+if trailer:
+    final_lines.append(trailer)
+
+# --- Upload cleaned output to S3
+s3.put_object(
+    Bucket=output_bucket,
+    Key=output_key,
+    Body='\n'.join(final_lines).encode('utf-8')
+)
