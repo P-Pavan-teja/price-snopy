@@ -1,0 +1,21 @@
+SET chunk_size = 3;
+
+WITH numbered AS (
+    SELECT *, 
+           ROW_NUMBER() OVER (ORDER BY your_order_column) as rn,
+           COUNT(*) OVER () as total_rows
+    FROM your_table
+)
+SELECT LISTAGG(
+    CASE 
+        WHEN (rn - 1) % $chunk_size = 0 AND (rn % $chunk_size = 0 OR rn = total_rows)
+        THEN 'begin ' || column1 || ' ' || column2 || ' end'  -- Single row group
+        WHEN (rn - 1) % $chunk_size = 0 
+        THEN 'begin ' || column1 || ' ' || column2  -- First of group
+        WHEN rn % $chunk_size = 0 OR rn = total_rows
+        THEN column1 || ' ' || column2 || ' end'  -- Last of group
+        ELSE column1 || ' ' || column2  -- Middle of group
+    END, 
+    ', '
+) as result
+FROM numbered;
