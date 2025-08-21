@@ -1,0 +1,65 @@
+# pip install boto3 pdfplumber pandas
+import boto3, io, pdfplumber, pandas as pd
+
+# --- Input / Output locations ---
+input_uri  = "s3://my-bucket/in/sample.pdf"
+output_uri = "s3://my-bucket/out/sample_csv"
+
+# --- Parse S3 URIs ---
+in_bucket, in_key = input_uri.replace("s3://", "").split("/", 1)
+out_bucket, out_prefix = output_uri.replace("s3://", "").split("/", 1)
+
+s3 = boto3.client("s3")
+
+# --- Read PDF from S3 ---
+pdf_bytes = s3.get_object(Bucket=in_bucket, Key=in_key)["Body"].read()
+
+# --- Extract tables and write CSV back to S3 ---
+with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+    for page_num, page in enumerate(pdf.pages, start=1):
+        tables = page.extract_tables()
+        for i, table in enumerate(tables, start=1):
+            df = pd.DataFrame(table).fillna("")
+            out_key = f"{out_prefix}/page{page_num}_table{i}.csv"
+
+            buf = io.StringIO()
+            df.to_csv(buf, index=False)
+
+            s3.put_object(Bucket=out_bucket, Key=out_key, Body=buf.getvalue())
+            print("✅ written:", f"s3://{out_bucket}/{out_key}")
+
+
+
+
+
+# pip install boto3 pdfplumber pandas
+import boto3, io, pdfplumber, pandas as pd
+
+# --- Input / Output ---
+input_uri  = "s3://my-bucket/in/sample.pdf"
+output_uri = "s3://my-bucket/out/sample.csv"
+
+# --- Parse S3 URIs ---
+in_bucket, in_key = input_uri.replace("s3://", "").split("/", 1)
+out_bucket, out_key = output_uri.replace("s3://", "").split("/", 1)
+
+s3 = boto3.client("s3")
+
+# --- Read PDF from S3 ---
+pdf_bytes = s3.get_object(Bucket=in_bucket, Key=in_key)["Body"].read()
+
+# --- Extract first table across pages ---
+all_rows = []
+with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+    for page in pdf.pages:
+        tables = page.extract_tables()
+        if tables:                  # take the first table on the page
+            all_rows.extend(tables[0])
+
+# --- Save as single CSV back to S3 ---
+df = pd.DataFrame(all_rows).fillna("")
+buf = io.StringIO()
+df.to_csv(buf, index=False)
+
+s3.put_object(Bucket=out_bucket, Key=out_key, Body=buf.getvalue())
+print("✅ written:", f"s3://{out_bucket}/{out_key}")
