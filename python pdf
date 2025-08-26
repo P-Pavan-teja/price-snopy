@@ -67,3 +67,30 @@ def write_csv_to_s3(df: pd.DataFrame, s3_uri: str):
         Body=buf.getvalue().encode("utf-8"),
         ContentType="text/csv"
     )
+import io
+import snowflake.snowpark as snowpark
+from snowflake.snowpark.functions import col
+
+def main(session: snowpark.Session):
+    # Example Snowpark DF -> Pandas
+    df_sp = session.table('information_schema.packages').filter(col('language') == 'python')
+    df_pd = df_sp.to_pandas()
+
+    # 1) Build CSV in text buffer
+    text_buf = io.StringIO()
+    df_pd.to_csv(text_buf, index=False)
+    text_buf.seek(0)
+
+    # 2) Convert to BYTES for put_stream
+    bytes_buf = io.BytesIO(text_buf.getvalue().encode('utf-8'))
+    bytes_buf.seek(0)
+
+    # 3) Upload with keyword args (stage path MUST be a quoted string)
+    session.file.put_stream(
+        stage_location="@COMMON_DB.UTIL_SCH.FOUNDRY_TEST/csvfiles/output.csv",
+        input_stream=bytes_buf,
+        overwrite=True,          # optional
+        auto_compress=False      # optional
+    )
+
+    return "CSV written to @COMMON_DB.UTIL_SCH.FOUNDRY_TEST/csvfiles/output.csv"
