@@ -1,13 +1,26 @@
-Here’s the usual order of operations:
-	1.	session.table() → Start by selecting the base table or view.
-	2.	select() → Pick only the required columns.
-	3.	filter() / where() → Apply row filters (like SQL WHERE).
-	4.	join() → Combine with other tables/DataFrames.
-	5.	group_by() + agg() → Perform aggregations (SQL GROUP BY).
-	6.	order_by() / sort() → Apply sorting.
-	7.	limit() → Restrict the number of rows.
-	8.	distinct() (optional, if needed) → Remove duplicates.
-	9.	collect() / to_pandas() → Finally trigger execution and bring data back to client.
+Snowpark Order of Operations
+	1.	session.table("...") / session.sql("...")
+👉 Starting point (like SQL FROM).
+	2.	join()
+👉 Add other tables first (like SQL joins).
+Note: you can also join later, but logically it’s near the start.
+	3.	where() / filter()
+👉 Row filtering (SQL WHERE).
+	4.	select()
+👉 Choose columns, expressions, aliases (SQL SELECT).
+	5.	group_by(...).agg(...)
+👉 Aggregation (SQL GROUP BY + aggregate functions).
+	6.	having (not a direct method; use .where() on the aggregated DataFrame).
+👉 Equivalent of SQL HAVING.
+	7.	distinct()
+👉 If needed (SQL SELECT DISTINCT).
+	8.	order_by() / sort()
+👉 Sorting (SQL ORDER BY).
+	9.	limit()
+👉 Restrict rows (SQL LIMIT).
+	10.	collect() / show() / to_pandas()
+👉 Trigger action (execute query & bring results).
+
 
 from snowflake.snowpark.functions import col, sum
 
