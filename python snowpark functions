@@ -1,3 +1,28 @@
+Here’s the usual order of operations:
+	1.	session.table() → Start by selecting the base table or view.
+	2.	select() → Pick only the required columns.
+	3.	filter() / where() → Apply row filters (like SQL WHERE).
+	4.	join() → Combine with other tables/DataFrames.
+	5.	group_by() + agg() → Perform aggregations (SQL GROUP BY).
+	6.	order_by() / sort() → Apply sorting.
+	7.	limit() → Restrict the number of rows.
+	8.	distinct() (optional, if needed) → Remove duplicates.
+	9.	collect() / to_pandas() → Finally trigger execution and bring data back to client.
+
+from snowflake.snowpark.functions import col, sum
+
+df = (
+    session.table("ORDERS")                 # 1. base table
+    .select("CUSTOMER_ID", "AMOUNT")        # 2. select columns
+    .filter(col("AMOUNT") > 100)            # 3. filter
+    .join(session.table("CUSTOMERS"),       # 4. join
+          "CUSTOMER_ID")
+    .group_by("CUSTOMER_ID")                # 5. group & aggregate
+    .agg(sum("AMOUNT").alias("TOTAL_SPEND"))
+    .order_by(col("TOTAL_SPEND").desc())    # 6. order
+    .limit(10)                              # 7. limit
+)
+
 from snowflake.snowpark.functions import col, lit, sum, avg, upper, length, when, row_number
 from snowflake.snowpark.window import Window
 
