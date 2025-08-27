@@ -1,3 +1,30 @@
+from snowflake.snowpark.functions import col, lit, sum, avg, upper, length, when, row_number
+from snowflake.snowpark.window import Window
+
+window_spec = Window.partition_by("CUSTOMER_ID").order_by(col("AMOUNT").desc())
+
+df = (
+    session.table("ORDERS")
+    .select(
+        "*",                                                # 1. All columns
+        "ORDER_ID", "CUSTOMER_ID",                          # 2. Specific columns
+        col("AMOUNT").alias("ORDER_AMOUNT"),                # 3. Rename
+        (col("QTY") * col("PRICE")).alias("TOTAL_PRICE"),   # 4. Expression
+        lit("USA").alias("COUNTRY"),                        # 5. Literal
+        sum("AMOUNT").alias("TOTAL_AMOUNT"),                # 6. Aggregates
+        avg("AMOUNT").alias("AVG_AMOUNT"),
+        upper(col("CITY")).alias("CITY_UPPER"),             # 7. Function
+        length(col("NAME")).alias("NAME_LEN"),
+        when(col("AMOUNT") > 1000, "HIGH")                  # 9. CASE WHEN
+          .when(col("AMOUNT") > 500, "MEDIUM")
+          .otherwise("LOW")
+          .alias("AMOUNT_CATEGORY"),
+        row_number().over(window_spec).alias("ROW_NUM")     # 10. Window fn
+    )
+    .distinct()  # 8. DISTINCT
+    .limit(10)
+)
+
 from snowflake.snowpark import Session
 from snowflake.snowpark.functions import col, sum, length, upper, regexp_like
 
