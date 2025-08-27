@@ -1,0 +1,76 @@
+from snowflake.snowpark import Session
+from snowflake.snowpark.functions import col, sum, length, upper, regexp_like
+
+# Assume ORDERS table has: ORDER_ID, CUSTOMER_ID, AMOUNT, STATUS, DISCOUNT, CITY, EMAIL, COMMENT, CATEGORY, QTY, NAME
+
+df = (
+    session.table("ORDERS")
+    .select("ORDER_ID", "CUSTOMER_ID", "AMOUNT", "STATUS", 
+            "DISCOUNT", "CITY", "EMAIL", "COMMENT", "CATEGORY", "QTY", "NAME")
+    
+    # 1. Comparison
+    .where(col("AMOUNT") > 500)               # AMOUNT > 500
+    .where(col("STATUS") == "PAID")           # STATUS = 'PAID'
+    .where(col("DISCOUNT") != 0)              # DISCOUNT <> 0
+    .where(col("QTY") <= 100)                 # QTY <= 100
+
+    # 2. Multiple conditions
+    .where((col("AMOUNT") > 500) & (col("STATUS") == "PAID"))   # AND
+    .where((col("QTY") < 10) | (col("DISCOUNT") > 5))           # OR
+    .where(~(col("STATUS") == "CANCELLED"))                     # NOT
+
+    # 3. String matching
+    .where(col("NAME").like("%smith%"))        # LIKE '%smith%'
+    .where(col("CITY").ilike("new%"))          # ILIKE 'new%'
+    .where(col("EMAIL").startswith("test@"))   # EMAIL LIKE 'test@%'
+    .where(col("EMAIL").endswith(".com"))      # EMAIL LIKE '%.com'
+    .where(col("COMMENT").contains("error"))   # COMMENT LIKE '%error%'
+
+    # 4. Null checks
+    .where(col("DISCOUNT").is_null())          # IS NULL
+    .where(col("DISCOUNT").is_not_null())      # IS NOT NULL
+
+    # 5. Membership (IN / NOT IN)
+    .where(col("STATUS").isin("PAID", "SHIPPED"))     # STATUS IN (...)
+    .where(~col("CATEGORY").isin("X", "Y", "Z"))      # CATEGORY NOT IN (...)
+
+    # 6. Between
+    .where((col("AMOUNT") >= 100) & (col("AMOUNT") <= 500))  # BETWEEN
+
+    # 7. Regular expressions
+    .where(regexp_like(col("EMAIL"), r"^[A-Za-z0-9._%+-]+@gmail\.com$"))
+
+    # 8. Expressions
+    .where(length(col("NAME")) > 5)             # LENGTH(NAME) > 5
+    .where(upper(col("CITY")) == "NEW YORK")    # UPPER(CITY) = 'NEW YORK'
+
+    # Final cleanup
+    .limit(10)
+)
+
+# Trigger action
+for row in df.collect():
+    print(row)
+SELECT ORDER_ID, CUSTOMER_ID, AMOUNT, STATUS, DISCOUNT, CITY, EMAIL, COMMENT, CATEGORY, QTY, NAME
+FROM ORDERS
+WHERE AMOUNT > 500
+  AND STATUS = 'PAID'
+  AND DISCOUNT <> 0
+  AND QTY <= 100
+  AND (AMOUNT > 500 AND STATUS = 'PAID')
+  AND (QTY < 10 OR DISCOUNT > 5)
+  AND STATUS <> 'CANCELLED'
+  AND NAME LIKE '%smith%'
+  AND CITY ILIKE 'new%'
+  AND EMAIL LIKE 'test@%'
+  AND EMAIL LIKE '%.com'
+  AND COMMENT LIKE '%error%'
+  AND DISCOUNT IS NULL
+  AND DISCOUNT IS NOT NULL
+  AND STATUS IN ('PAID', 'SHIPPED')
+  AND CATEGORY NOT IN ('X','Y','Z')
+  AND (AMOUNT BETWEEN 100 AND 500)
+  AND REGEXP_LIKE(EMAIL, '^[A-Za-z0-9._%+-]+@gmail\.com$')
+  AND LENGTH(NAME) > 5
+  AND UPPER(CITY) = 'NEW YORK'
+LIMIT 10;
