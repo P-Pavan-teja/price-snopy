@@ -1,0 +1,191 @@
+– Create or replace a stored procedure named READ_PDF_TEXT_TO_CSV
+CREATE OR REPLACE PROCEDURE READ_PDF_TEXT_TO_CSV(
+STAGE_PATH   STRING,   – Input parameter: path to PDF file in Snowflake stage (e.g. ‘@COMMON_DB.UTIL_SCH.FOUNDRY_TEST/INV0236-…pdf’)
+OUT_CSV_PATH STRING    – Input parameter: output path for CSV file in Snowflake stage (e.g. ‘@COMMON_DB.UTIL_SCH.FOUNDRY_TEST/csvfiles/output.csv’)
+)
+RETURNS STRING           – The procedure returns a string message about the operation result
+LANGUAGE PYTHON          – This procedure is written in Python (not SQL)
+RUNTIME_VERSION = ‘3.10’ – Use Python version 3.10 runtime environment
+PACKAGES = (‘snowflake-snowpark-python’,‘pandas’,‘pdfplumber’) – External Python packages required for execution
+HANDLER = ‘main’         – The main entry point function name that Snowflake will call
+EXECUTE AS CALLER        – Run with the privileges of the user who calls the procedure (not the procedure owner)
+AS                       – Begin the procedure body definition
+$$                       – Start of Python code block delimiter
+import io                – Import io module for handling input/output streams and buffers
+import pandas as pd      – Import pandas library for data manipulation and analysis, aliased as ‘pd’
+import pdfplumber        – Import pdfplumber library for extracting text from PDF files
+from snowflake.snowpark import Session  – Import Session class from Snowflake’s Python connector
+
+# –––––––––––––
+
+# PDF -> lines DataFrame    – Comment section divider for PDF processing functionality
+
+# –––––––––––––
+
+def pdf_to_df(session: Session, stage_path: str):  – Define function to convert PDF to DataFrame, takes session and file path
+with session.file.get_stream(stage_path) as file_stream:  – Open a stream to read file from Snowflake stage
+data = file_stream.read()  – Read all bytes from the PDF file stream into memory
+lines = []               – Initialize empty list to store all text lines from PDF
+with pdfplumber.open(io.BytesIO(data)) as pdf:  – Open PDF using pdfplumber, converting bytes to BytesIO stream
+for page in pdf.pages:  – Iterate through each page in the PDF document
+t = page.extract_text()  – Extract all text content from current page as a string
+if t:                    – Check if text was successfully extracted (not None or empty)
+lines.extend([ln.strip() for ln in t.splitlines() if ln])  – Split text into lines, strip whitespace, add non-empty lines to list
+return pd.DataFrame({‘Line’: lines})  – Create and return a pandas DataFrame with all lines in ‘Line’ column
+
+# –––––––––––––
+
+# Range helpers             – Comment section for utility functions to filter data ranges
+
+# –––––––––––––
+
+def filter_rows_between_substrings(df, start_substring, end_substring, column):  – Function to extract rows between two marker strings
+filtered_dfs = []        – Initialize list to store filtered DataFrame sections
+start_idx = df[df[column].str.contains(start_substring, na=False)].index  – Find all row indices containing start marker string
+end_idx   = df[df[column].str.contains(end_substring,   na=False)].index  – Find all row indices containing end marker string
+for s, e in zip(start_idx, end_idx):  – Iterate through pairs of start and end indices
+if s < e:                         – Ensure start index comes before end index (valid range)
+filtered_dfs.append(df.loc[s:e])  – Extract rows from start to end index and add to list
+return pd.concat(filtered_dfs, ignore_index=True) if filtered_dfs else pd.DataFrame(columns=[column])  – Combine all sections or return empty DataFrame
+
+# –––––––––––––
+
+# Extractors                – Comment section for data extraction functions
+
+# –––––––––––––
+
+def extract_securities(df: pd.DataFrame) -> pd.DataFrame:  – Function to extract securities/account information
+sec = df[df[‘Line’].str.contains(“Total For :”, case=True, na=False)].copy()  – Find rows containing “Total For :” text (account totals)
+sec[[‘Placeholder’,‘Account Name’]] = sec[‘Line’].str.split(’:’, n=1, expand=True)  – Split line on first colon to separate label and account name
+sec = sec.drop(columns=[‘Line’,‘Placeholder’])  – Remove original Line column and placeholder column
+parts = sec[‘Account Name’].str.split(’$’, expand=True)  – Split account name on dollar sign to separate name from amounts
+sec[‘Account Name’] = parts[0].str.strip()      – Take first part (before $) as clean account name, remove whitespace
+if ‘unique_id’ not in sec.columns:              – Check if unique_id column doesn’t exist yet
+sec = sec.reset_index(drop=True)            – Reset DataFrame index to start from 0
+sec[‘unique_id’] = sec.index + 1            – Create unique_id column starting from 1 (index + 1)
+sec = sec.loc[:, ~sec.columns.duplicated()]     – Remove any duplicate columns that might exist
+return sec[[‘unique_id’,‘Account Name’]]        – Return DataFrame with only unique_id and Account Name columns
+
+def extract_as_of_date(df: pd.DataFrame) -> pd.DataFrame:  – Function to extract the “as of” date from document
+aso = df[df[‘Line’].str.contains(“AS OF”, case=True, na=False)].copy()  – Find rows containing “AS OF” text
+if aso.empty:                                   – Check if no “AS OF” rows were found
+return pd.DataFrame({‘As of Date’: []})     – Return empty DataFrame with proper column name
+aso[[‘Placeholder’,‘As of Date’]] = aso[‘Line’].str.split(‘OF’, n=1, expand=True)  – Split on “OF” to extract date part
+aso = aso.drop(columns=[‘Line’,‘Placeholder’]).reset_index(drop=True)  – Remove unnecessary columns and reset index
+return aso.iloc[[0]][[‘As of Date’]].reset_index(drop=True)  – Return only first occurrence of date, reset index
+
+def extract_mutual_fund_mk_val(df: pd.DataFrame) -> pd.DataFrame:  – Function to extract mutual fund market values
+mf = df[df[‘Line’].str.contains(‘Mutual Fund’, case=True, na=False)].copy()  – Find rows containing “Mutual Fund” text
+if mf.empty:                                    – Check if no mutual fund rows found
+return pd.DataFrame(columns=[‘unique_id’,‘Collateral Type’,‘Market Value’])  – Return empty DataFrame with expected columns
+mf[[‘Collateral Type’,‘Principal Amount’,‘Market Value’,‘Book Value’,‘Interest Accrued’]] =   
+mf[‘Line’].str.split(’$’, n=4, expand=True)  – Split line on dollar signs to separate financial amounts
+mf = mf.drop(columns=[‘Line’,‘Principal Amount’,‘Book Value’,‘Interest Accrued’])  – Keep only needed columns
+mf[‘Collateral Type’] = mf[‘Collateral Type’].str.strip()  – Clean whitespace from collateral type text
+return mf[[‘unique_id’,‘Collateral Type’,‘Market Value’]].reset_index(drop=True)  – Return cleaned DataFrame
+
+def extract_cash_mk_val(df: pd.DataFrame) -> pd.DataFrame:  – Function to extract cash market values
+usd = df[df[‘Line’].str.startswith(‘USD ‘, na=False)].copy()  – Find rows starting with “USD “ (cash entries)
+if usd.empty:                                   – Check if no USD rows found
+return pd.DataFrame(columns=[‘unique_id’,‘Collateral Type’,‘Market Value’])  – Return empty DataFrame
+toks = usd[‘Line’].str.split(’$’, n=4, expand=True)  – Split line on dollar signs
+usd[‘Collateral Type’] = ‘Cash’                – Set collateral type to “Cash” for all USD entries
+usd[‘Market Value’] = toks.iloc[:, 1] if toks.shape[1] > 1 else None  – Extract market value from second column if it exists
+return usd[[‘unique_id’,‘Collateral Type’,‘Market Value’]].reset_index(drop=True)  – Return cleaned DataFrame
+
+def extract_debentures(df: pd.DataFrame) -> pd.DataFrame:  – Function to extract debenture information
+deb = df[df[‘Line’].str.contains(‘Debentures’, case=True, na=False)].copy()  – Find rows containing “Debentures”
+if deb.empty:                                   – Check if no debenture rows found
+return pd.DataFrame(columns=[‘unique_id’,‘Collateral Type’,‘Market Value’])  – Return empty DataFrame
+deb[[‘Collateral Type’,‘Principal Amount’,‘Market Value’,‘Book Value’,‘Interest Accrued’]] =   
+deb[‘Line’].str.split(’$’, n=4, expand=True)  – Split on dollar signs to extract amounts
+deb = deb.drop(columns=[‘Line’,‘Principal Amount’,‘Book Value’,‘Interest Accrued’])  – Keep only needed columns
+deb[‘Collateral Type’] = deb[‘Collateral Type’].str.strip()  – Clean whitespace from collateral type
+return deb[[‘unique_id’,‘Collateral Type’,‘Market Value’]].reset_index(drop=True)  – Return cleaned DataFrame
+
+# —————
+
+# MAIN              – Comment for main function section
+
+# —————
+
+def main(session: Session, stage_path: str, out_csv_path: str):  – Main function called by Snowflake, receives session and file paths
+# 1) PDF -> lines  – Step 1: Convert PDF to lines
+df = pdf_to_df(session, stage_path)  – Call function to read PDF and convert to DataFrame of text lines
+
+```
+# 2) limit region & cleanup  -- Step 2: Filter to relevant section and clean data
+start_substring = 'AS OF'           -- Define start marker for data extraction region
+end_substring   = 'Total For :'     -- Define end marker for data extraction region
+result = filter_rows_between_substrings(df, start_substring, end_substring, 'Line')  -- Extract only rows between markers
+if not result.empty:                -- Check if filtered result contains data
+    result = result[(result['Line'] != 'Accrued') & (~result['Line'].str.contains('MOODY S&P FITCH', na=False))].reset_index(drop=True)  -- Remove unwanted rows and reset index
+
+# 3) assign unique_id groups  -- Step 3: Assign unique identifiers to group related records
+unique_id = 0               -- Initialize counter for unique ID assignment
+ids, inside = [], False     -- Initialize list for IDs and flag for tracking if inside a valid section
+for row in result['Line']:  -- Iterate through each line in filtered results
+    if start_substring in row:  -- Check if current line contains start marker
+        unique_id += 1          -- Increment unique ID counter for new section
+        inside = True           -- Set flag indicating we're inside a valid section
+    if end_substring in row and inside:  -- Check if current line contains end marker and we're inside section
+        inside = False          -- Set flag indicating we've exited the section
+    ids.append(unique_id if inside else 0)  -- Append current unique ID if inside section, otherwise 0
+result['unique_id'] = ids   -- Add unique_id column to DataFrame
+result = result[result['unique_id'] > 0].reset_index(drop=True)  -- Keep only rows with valid unique IDs
+
+# 4) account + date  -- Step 4: Extract account names and dates
+account_name = extract_securities(result).reset_index(drop=True)  -- Extract account information, reset index
+asof_df      = extract_as_of_date(result)                         -- Extract "as of" date information
+asof_val     = asof_df['As of Date'].iloc[0] if not asof_df.empty else None  -- Get first date value or None if empty
+account_name['As of Date'] = asof_val  -- Add date to account DataFrame (same date for all accounts)
+account_name = account_name[['unique_id','Account Name','As of Date']]  -- Reorder columns
+
+# 5) collateral market values  -- Step 5: Extract different types of collateral values
+mf   = extract_mutual_fund_mk_val(result)  -- Extract mutual fund data
+cash = extract_cash_mk_val(result)         -- Extract cash data
+deb  = extract_debentures(result)          -- Extract debenture data
+
+collateral = pd.concat([mf, cash, deb], axis=0, ignore_index=True)  -- Combine all collateral types into single DataFrame
+if not collateral.empty:            -- Check if collateral data exists
+    collateral = collateral.loc[:, ~collateral.columns.duplicated()]\
+                           .sort_values(by=['unique_id']).reset_index(drop=True)  -- Remove duplicate columns, sort by ID, reset index
+
+# 6) merge  -- Step 6: Combine account information with collateral data
+acct_name_date = account_name.loc[:, ~account_name.columns.duplicated()]  -- Remove duplicate columns from account data
+collateral     = collateral.loc[:, ~collateral.columns.duplicated()]      -- Remove duplicate columns from collateral data
+
+merged = pd.merge(      -- Perform database-style join operation
+    acct_name_date,     -- Left DataFrame (account names and dates)
+    collateral,         -- Right DataFrame (collateral information)
+    on='unique_id',     -- Join on unique_id column
+    how='right',        -- Right join: keep all collateral records, match with accounts where possible
+    validate='one_to_one'  -- Ensure each unique_id appears only once in each DataFrame
+)
+
+# 7) final pandas DataFrame with desired schema  -- Step 7: Create final output format
+final = merged.rename(columns={     -- Rename columns to match desired output schema
+    'Account Name':'ACCOUNT_NAME',          -- Rename to uppercase standard naming
+    'As of Date':'AS_OF_DATE',              -- Rename to uppercase standard naming
+    'Collateral Type':'COLLATERAL_TYPE',    -- Rename to uppercase standard naming
+    'Market Value':'MARKET_VALUE'           -- Rename to uppercase standard naming
+})[['unique_id','ACCOUNT_NAME','AS_OF_DATE','COLLATERAL_TYPE','MARKET_VALUE']]  -- Select and reorder final columns
+
+# 8) write CSV to stage (BytesIO + keyword args)  -- Step 8: Save results to Snowflake stage as CSV
+text_buf = io.StringIO()            -- Create in-memory text buffer for CSV content
+final.to_csv(text_buf, index=False) -- Write DataFrame to text buffer as CSV (no row index)
+text_buf.seek(0)                    -- Reset buffer pointer to beginning
+bytes_buf = io.BytesIO(text_buf.getvalue().encode('utf-8'))  -- Convert text to bytes buffer with UTF-8 encoding
+bytes_buf.seek(0)                   -- Reset bytes buffer pointer to beginning
+
+session.file.put_stream(            -- Upload buffer content to Snowflake stage
+    stage_location=out_csv_path,    -- Destination path in Snowflake stage
+    input_stream=bytes_buf,         -- Source data stream (bytes buffer)
+    overwrite=True,                 -- Replace existing file if it exists
+    auto_compress=False             -- Don't compress the file automatically
+)
+
+return f"CSV written to {out_csv_path} with {len(final)} rows."  -- Return success message with row count
+```
+
+$$;                                     – End of Python code block delimiter
