@@ -187,5 +187,26 @@ session.file.put_stream(            -- Upload buffer content to Snowflake stage
 
 return f"CSV written to {out_csv_path} with {len(final)} rows."  -- Return success message with row count
 ```
+# --------------------------
+# BATCH HANDLER
+# --------------------------
+def check_pdf(session: Session, stage_prefix: str, out_prefix: str):
+    stage_prefix = _ensure_slash(stage_prefix)
+    out_prefix   = _ensure_slash(out_prefix)
 
-$$;                                     – End of Python code block delimiter
+    # LIST returns rows; NAME column is the relative path under the stage
+    rows = session.sql(f"LIST {stage_prefix}").collect()
+    rel_names = [r['name'] for r in rows if r['name'].lower().endswith('.pdf')]
+
+    if not rel_names:
+        return f"No PDFs found under {stage_prefix}"
+
+    results = []
+    for rel in rel_names:
+        try:
+            results.append(process_one(session, stage_prefix, out_prefix, rel))
+        except Exception as e:
+            results.append(f"{rel} -> ERROR: {e}")
+
+    return " | ".join(results)
+$$;                                     –- End of Python code block delimiter
