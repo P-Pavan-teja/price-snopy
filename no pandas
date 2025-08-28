@@ -1,0 +1,160 @@
+CREATE OR REPLACE PROCEDURE READ_PDF_TEXT_TO_TABLE(
+STAGE_PATH    STRING,   – e.g. ‘@COMMON_DB.UTIL_SCH.FOUNDRY_TEST/INV0236-…pdf’
+TARGET_TABLE  STRING    – e.g. ‘COMMON_DB.UTIL_SCH.PDF_EXTRACT_RESULTS’
+)
+RETURNS STRING
+LANGUAGE PYTHON
+RUNTIME_VERSION = ‘3.10’
+PACKAGES = (‘snowflake-snowpark-python’,‘pdfplumber’)
+HANDLER = ‘main’
+EXECUTE AS CALLER
+AS
+$$
+import io
+import pdfplumber
+from snowflake.snowpark import Session
+from snowflake.snowpark.functions import col, lit, when, regexp_extract, split, trim
+from snowflake.snowpark.types import StructType, StructField, StringType, IntegerType
+
+# –––––––––––––
+
+# PDF -> Snowpark DataFrame
+
+# –––––––––––––
+
+def pdf_to_snowpark_df(session: Session, stage_path: str):
+# Extract PDF content
+with session.file.get_stream(stage_path) as file_stream:
+data = file_stream.read()
+
+```
+lines_data = []
+with pdfplumber.open(io.BytesIO(data)) as pdf:
+    for page_num, page in enumerate(pdf.pages):
+        text = page.extract_text()
+        if text:
+            for line_num, line in enumerate(text.splitlines()):
+                if line.strip():
+                    lines_data.append((page_num + 1, line_num + 1, line.strip()))
+
+# Create Snowpark DataFrame directly
+schema = StructType([
+    StructField("PAGE_NUM", IntegerType()),
+    StructField("LINE_NUM", IntegerType()),
+    StructField("LINE_TEXT", StringType())
+])
+
+return session.create_dataframe(lines_data, schema)
+```
+
+# –––––––––––––
+
+# MAIN FUNCTION
+
+# –––––––––––––
+
+def main(session: Session, stage_path: str, target_table: str):
+# 1) Create Snowpark DataFrame from PDF
+lines_df = pdf_to_snowpark_df(session, stage_path)
+
+```
+# 2) Extract AS OF date (first occurrence)
+as_of_df = lines_df.filter(col("LINE_TEXT").contains("AS OF")) \
+                  .select(split(col("LINE_TEXT"), lit("OF"))[1].alias("AS_OF_DATE")) \
+                  .limit(1)
+
+as_of_date = as_of_df.collect()[0]["AS_OF_DATE"].strip() if as_of_df.count() > 0 else ""
+
+# 3) Assign unique_id based on sections (AS OF to Total For :)
+# Create a window to identify sections
+lines_with_sections = lines_df.with_column(
+    "IS_START", 
+    when(col("LINE_TEXT").contains("AS OF"), lit(1)).otherwise(lit(0))
+).with_column(
+    "IS_END",
+    when(col("LINE_TEXT").contains("Total For :"), lit(1)).otherwise(lit(0))
+)
+
+# Filter to relevant lines and add unique_id
+# This is a simplified approach - in practice you might need window functions for complex sectioning
+filtered_df = lines_with_sections.filter(
+    (col("LINE_TEXT").contains("AS OF")) |
+    (col("LINE_TEXT").contains("Total For :")) |
+    (col("LINE_TEXT").contains("Mutual Fund")) |
+    (col("LINE_TEXT").startswith("USD ")) |
+    (col("LINE_TEXT").contains("Debentures"))
+).filter(
+    (~col("LINE_TEXT").contains("Accrued")) &
+    (~col("LINE_TEXT").contains("MOODY S&P FITCH"))
+)
+
+# 4) Extract account names from "Total For :" lines
+account_df = filtered_df.filter(col("LINE_TEXT").contains("Total For :")) \
+                       .with_column("ACCOUNT_NAME", 
+                                  trim(split(split(col("LINE_TEXT"), lit(":"))[1], lit("$"))[0])) \
+                       .select("LINE_NUM", "ACCOUNT_NAME")
+
+# 5) Extract collateral data
+collateral_df = filtered_df.filter(
+    (col("LINE_TEXT").contains("Mutual Fund")) |
+    (col("LINE_TEXT").startswith("USD ")) |
+    (col("LINE_TEXT").contains("Debentures"))
+)
+
+# Process different collateral types
+mutual_fund_df = collateral_df.filter(col("LINE_TEXT").contains("Mutual Fund")) \
+                             .with_column("COLLATERAL_TYPE", 
+                                        trim(split(col("LINE_TEXT"), lit("$"))[0])) \
+                             .with_column("MARKET_VALUE",
+                                        trim(split(col("LINE_TEXT"), lit("$"))[2])) \
+                             .select("LINE_NUM", "COLLATERAL_TYPE", "MARKET_VALUE")
+
+cash_df = collateral_df.filter(col("LINE_TEXT").startswith("USD ")) \
+                      .with_column("COLLATERAL_TYPE", lit("Cash")) \
+                      .with_column("MARKET_VALUE",
+                                 trim(split(col("LINE_TEXT"), lit("$"))[1])) \
+                      .select("LINE_NUM", "COLLATERAL_TYPE", "MARKET_VALUE")
+
+debentures_df = collateral_df.filter(col("LINE_TEXT").contains("Debentures")) \
+                            .with_column("COLLATERAL_TYPE",
+                                       trim(split(col("LINE_TEXT"), lit("$"))[0])) \
+                            .with_column("MARKET_VALUE",
+                                       trim(split(col("LINE_TEXT"), lit("$"))[2])) \
+                            .select("LINE_NUM", "COLLATERAL_TYPE", "MARKET_VALUE")
+
+# 6) Union all collateral data
+all_collateral_df = mutual_fund_df.union_all(cash_df).union_all(debentures_df)
+
+# 7) Create final DataFrame with proper structure
+# Note: This is a simplified join logic - you may need more sophisticated logic 
+# to properly match accounts with their collateral based on PDF structure
+final_df = all_collateral_df.with_column("UNIQUE_ID", col("LINE_NUM")) \
+                           .with_column("ACCOUNT_NAME", lit("")) \
+                           .with_column("AS_OF_DATE", lit(as_of_date)) \
+                           .select("UNIQUE_ID", "ACCOUNT_NAME", "AS_OF_DATE", "COLLATERAL_TYPE", "MARKET_VALUE")
+
+# 8) Insert into target table
+if final_df.count() > 0:
+    final_df.write.mode("append").save_as_table(target_table)
+    return f"Successfully inserted {final_df.count()} rows into {target_table}"
+else:
+    return "No data extracted from PDF"
+```
+
+$$;
+
+– Create the target table (run this separately)
+CREATE OR REPLACE TABLE COMMON_DB.UTIL_SCH.PDF_EXTRACT_RESULTS (
+UNIQUE_ID INTEGER,
+ACCOUNT_NAME STRING,
+AS_OF_DATE STRING,
+COLLATERAL_TYPE STRING,
+MARKET_VALUE STRING,
+INSERTED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+);
+
+– Example usage:
+– CALL READ_PDF_TEXT_TO_TABLE(
+–   ‘@COMMON_DB.UTIL_SCH.FOUNDRY_TEST/INV0236-example.pdf’,
+–   ‘COMMON_DB.UTIL_SCH.PDF_EXTRACT_RESULTS’
+– );
