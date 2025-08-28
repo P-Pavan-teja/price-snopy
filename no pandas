@@ -158,3 +158,214 @@ INSERTED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
 –   ‘@COMMON_DB.UTIL_SCH.FOUNDRY_TEST/INV0236-example.pdf’,
 –   ‘COMMON_DB.UTIL_SCH.PDF_EXTRACT_RESULTS’
 – );
+
+CREATE OR REPLACE PROCEDURE READ_PDF_TEXT_TO_TABLE(
+STAGE_PATH    STRING,   – e.g. ‘@COMMON_DB.UTIL_SCH.FOUNDRY_TEST/INV0236-…pdf’
+TARGET_TABLE  STRING    – e.g. ‘COMMON_DB.UTIL_SCH.PDF_EXTRACT_RESULTS’
+)
+RETURNS STRING
+LANGUAGE PYTHON
+RUNTIME_VERSION = ‘3.10’
+PACKAGES = (‘snowflake-snowpark-python’,‘pdfplumber’)
+HANDLER = ‘main’
+EXECUTE AS CALLER
+AS
+$$
+import io
+import pdfplumber
+from snowflake.snowpark import Session
+from snowflake.snowpark.functions import col, lit
+from snowflake.snowpark.types import StructType, StructField, StringType, IntegerType
+
+# –––––––––––––
+
+# PDF -> lines list
+
+# –––––––––––––
+
+def pdf_to_lines(session: Session, stage_path: str):
+with session.file.get_stream(stage_path) as file_stream:
+data = file_stream.read()
+
+```
+lines = []
+with pdfplumber.open(io.BytesIO(data)) as pdf:
+    for page in pdf.pages:
+        text = page.extract_text()
+        if text:
+            lines.extend([line.strip() for line in text.splitlines() if line.strip()])
+return lines
+```
+
+# –––––––––––––
+
+# Filter lines between substrings
+
+# –––––––––––––
+
+def filter_lines_between_substrings(lines, start_substring, end_substring):
+filtered_lines = []
+inside_section = False
+unique_id = 0
+
+```
+for line in lines:
+    if start_substring in line:
+        unique_id += 1
+        inside_section = True
+        continue
+        
+    if end_substring in line and inside_section:
+        filtered_lines.append((unique_id, line))
+        inside_section = False
+        continue
+        
+    if inside_section:
+        # Skip unwanted lines
+        if line == 'Accrued' or 'MOODY S&P FITCH' in line:
+            continue
+        filtered_lines.append((unique_id, line))
+
+return filtered_lines
+```
+
+# –––––––––––––
+
+# Extract account names
+
+# –––––––––––––
+
+def extract_account_names(filtered_lines):
+accounts = []
+for unique_id, line in filtered_lines:
+if “Total For :” in line:
+account_name = line.split(’:’, 1)[1].split(’$’)[0].strip()
+accounts.append((unique_id, account_name))
+return accounts
+
+# –––––––––––––
+
+# Extract as-of date
+
+# –––––––––––––
+
+def extract_as_of_date(lines):
+for line in lines:
+if “AS OF” in line.upper():
+return line.split(‘OF’, 1)[1].strip()
+return None
+
+# –––––––––––––
+
+# Extract collateral data
+
+# –––––––––––––
+
+def extract_collateral_data(filtered_lines):
+collateral_data = []
+
+```
+for unique_id, line in filtered_lines:
+    market_value = None
+    collateral_type = None
+    
+    # Mutual Fund
+    if 'Mutual Fund' in line:
+        parts = line.split('$')
+        if len(parts) >= 3:
+            collateral_type = parts[0].strip()
+            market_value = parts[2].strip()
+    
+    # Cash (USD)
+    elif line.startswith('USD '):
+        parts = line.split('$')
+        if len(parts) >= 2:
+            collateral_type = 'Cash'
+            market_value = parts[1].strip()
+    
+    # Debentures
+    elif 'Debentures' in line:
+        parts = line.split('$')
+        if len(parts) >= 3:
+            collateral_type = parts[0].strip()
+            market_value = parts[2].strip()
+    
+    if collateral_type and market_value:
+        collateral_data.append((unique_id, collateral_type, market_value))
+
+return collateral_data
+```
+
+# –––––––––––––
+
+# MAIN FUNCTION
+
+# –––––––––––––
+
+def main(session: Session, stage_path: str, target_table: str):
+# 1) Extract lines from PDF
+lines = pdf_to_lines(session, stage_path)
+
+```
+# 2) Filter lines between AS OF and Total For sections
+filtered_lines = filter_lines_between_substrings(lines, 'AS OF', 'Total For :')
+
+# 3) Extract components
+account_names = extract_account_names(filtered_lines)  # [(unique_id, account_name), ...]
+as_of_date = extract_as_of_date(lines)
+collateral_data = extract_collateral_data(filtered_lines)  # [(unique_id, type, value), ...]
+
+# 4) Prepare data for Snowpark DataFrame
+final_data = []
+
+# Create lookup dictionary for account names
+account_lookup = {uid: name for uid, name in account_names}
+
+for unique_id, collateral_type, market_value in collateral_data:
+    account_name = account_lookup.get(unique_id, '')
+    final_data.append((
+        unique_id,
+        account_name,
+        as_of_date,
+        collateral_type,
+        market_value
+    ))
+
+if not final_data:
+    return "No data extracted from PDF"
+
+# 5) Create Snowpark DataFrame
+schema = StructType([
+    StructField("UNIQUE_ID", IntegerType()),
+    StructField("ACCOUNT_NAME", StringType()),
+    StructField("AS_OF_DATE", StringType()),
+    StructField("COLLATERAL_TYPE", StringType()),
+    StructField("MARKET_VALUE", StringType())
+])
+
+df = session.create_dataframe(final_data, schema)
+
+# 6) Insert into target table
+df.write.mode("append").save_as_table(target_table)
+
+return f"Successfully inserted {len(final_data)} rows into {target_table}"
+```
+
+$$;
+
+– Create the target table (run this separately)
+CREATE OR REPLACE TABLE COMMON_DB.UTIL_SCH.PDF_EXTRACT_RESULTS (
+UNIQUE_ID INTEGER,
+ACCOUNT_NAME STRING,
+AS_OF_DATE STRING,
+COLLATERAL_TYPE STRING,
+MARKET_VALUE STRING,
+INSERTED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+);
+
+– Example usage:
+– CALL READ_PDF_TEXT_TO_TABLE(
+–   ‘@COMMON_DB.UTIL_SCH.FOUNDRY_TEST/INV0236-example.pdf’,
+–   ‘COMMON_DB.UTIL_SCH.PDF_EXTRACT_RESULTS’
+– );
+
