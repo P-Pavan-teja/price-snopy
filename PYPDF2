@@ -1,0 +1,56 @@
+CREATE OR REPLACE PROCEDURE READ_PDF_TEXT_TO_TABLE(
+    STAGE_PATH STRING
+)
+RETURNS TABLE(LINE STRING)
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.10'
+PACKAGES = ('snowflake-snowpark-python')
+IMPORTS = ('@COMMON_DB.UTIL_SCH.FOUNDRY_TEST/libraries/pypdf2.zip')
+HANDLER = 'main'
+EXECUTE AS CALLER
+AS
+$$
+import io
+import PyPDF2
+import pandas as pd
+from snowflake.snowpark import Session
+from snowflake.snowpark.types import StructType, StructField, StringType
+
+def pdf_to_df(session: Session, stage_path: str):
+    try:
+        with session.file.get_stream(stage_path) as file_stream:
+            data = file_stream.read()
+        
+        all_text = []
+        
+        # Use PyPDF2 to extract text
+        with io.BytesIO(data) as pdf_file:
+            pdf_reader = PyPDF2.PdfReader(pdf_file)
+            
+            for page_num, page in enumerate(pdf_reader.pages):
+                text = page.extract_text()
+                if text:
+                    lines = [line.strip() for line in text.splitlines() if line.strip()]
+                    # Add page number prefix to each line (optional)
+                    lines_with_page = [f"{line}" for line in lines]
+                    all_text.extend(lines_with_page)
+        
+        lines_df = pd.DataFrame({"LINE": all_text})
+        return lines_df
+    
+    except Exception as e:
+        error_df = pd.DataFrame({"LINE": [f"Error processing PDF: {str(e)}"]})
+        return error_df
+
+def main(session: Session, stage_path: str):
+    df = pdf_to_df(session, stage_path)
+    
+    schema = StructType([
+        StructField("LINE", StringType())
+    ])
+    
+    snowpark_df = session.create_dataframe(df, schema=schema)
+    return snowpark_df
+$$;
+
+CALL READ_PDF_TEXT_TO_TABLE('@COMMON_DB.UTIL_SCH.FOUNDRY_TEST/5OXihh054h7134320203939031104202.pdf');
