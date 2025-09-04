@@ -1,0 +1,26 @@
+# CREATE
+python -m venv env_name
+
+# ACTIVATE (macOS/Linux)
+source env_name/bin/activate
+
+# ACTIVATE (Windows)
+env_name\Scripts\activate
+
+# INSTALL PACKAGES
+pip install package_name
+
+# LIST PACKAGES
+pip list
+
+# SAVE REQUIREMENTS
+pip freeze > requirements.txt
+
+# INSTALL FROM REQUIREMENTS
+pip install -r requirements.txt
+
+# DEACTIVATE
+deactivate
+
+# DELETE
+rm -rf env_name
