@@ -549,6 +549,9 @@ security_table = pd.concat([combined_cusip, collateral], axis=1)
 # Joins the As of Date/Account Name df with the Market Value and Cusip/Security Description df based on unique id
 new_security_table = pd.merge(acct_name_date, security_table, on='unique_id', how='right')
 
-# Writes the final df to a csv file
-new_security_table.to_csv("Securities_Lending_Output-8-13-2025.csv", index=False)
+# Writes the final df to a csv file in S3
+csv_buffer = io.StringIO()
+new_security_table.to_csv(csv_buffer, index=False)
+s3 = boto3.client('s3')
+s3.put_object(Bucket=output_bucket, Key="Securities_Lending_Output-8-13-2025.csv", Body=csv_buffer.getvalue())
 print("PDF converted to CSV")
