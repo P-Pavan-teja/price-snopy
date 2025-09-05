@@ -1,0 +1,70 @@
+import pdfplumber
+import pandas as pd
+import boto3
+import io
+
+def process_pdf_s3_to_s3(input_bucket: str, input_key: str, output_bucket: str, output_key: str):
+    """Stream PDF from S3, extract text, and save CSV back to S3"""
+    s3 = boto3.client('s3')
+    
+    # Stream PDF from S3
+    response = s3.get_object(Bucket=input_bucket, Key=input_key)
+    pdf_stream = io.BytesIO(response['Body'].read())
+    
+    # Extract text
+    all_text = []
+    with pdfplumber.open(pdf_stream) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if text:
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+                all_text.extend(lines)
+    
+    # Create CSV in memory and upload to S3
+    df = pd.DataFrame({"LINE": all_text})
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+    
+    s3.put_object(
+        Bucket=output_bucket,
+        Key=output_key,
+        Body=csv_buffer.getvalue(),
+        ContentType='text/csv'
+    )
+
+def read_csv_head_from_s3(bucket: str, key: str):
+    """Read first 10 rows from CSV file in S3"""
+    s3 = boto3.client('s3')
+    response = s3.get_object(Bucket=bucket, Key=key)
+    csv_content = response['Body'].read().decode('utf-8')
+    
+    csv_df = pd.read_csv(io.StringIO(csv_content))
+    return csv_df.head(10)
+
+def delete_csv_from_s3(bucket: str, key: str):
+    """Delete CSV file from S3"""
+    s3 = boto3.client('s3')
+    s3.delete_object(Bucket=bucket, Key=key)
+
+
+from s3_pdf_functions import process_pdf_s3_to_s3, read_csv_head_from_s3, delete_csv_from_s3
+
+def main():
+    input_bucket = "simplegeneraluse"
+    input_key = "srcfiles/databricks-certified-data-engineer-associate-exam-guide-25-3.pdf"
+    output_bucket = "simplegeneraluse"
+    output_key = "outputfiles/file.csv"
+
+    
+    # Process PDF and save CSV to S3
+    process_pdf_s3_to_s3(input_bucket, input_key, output_bucket, output_key)
+    
+    # Read head from CSV file in S3
+    csv_head = read_csv_head_from_s3(output_bucket, output_key)
+    print(csv_head)
+
+    # Delete CSV file from S3
+    # delete_csv_from_s3(output_bucket, output_key)
+
+if __name__ == "__main__":
+    main()
