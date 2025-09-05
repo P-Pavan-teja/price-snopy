@@ -1,70 +1,554 @@
 import pdfplumber
 import pandas as pd
+import warnings
 import boto3
 import io
-
-def process_pdf_s3_to_s3(input_bucket: str, input_key: str, output_bucket: str, output_key: str):
-    """Stream PDF from S3, extract text, and save CSV back to S3"""
-    s3 = boto3.client('s3')
-    
-    # Stream PDF from S3
-    response = s3.get_object(Bucket=input_bucket, Key=input_key)
-    pdf_stream = io.BytesIO(response['Body'].read())
-    
-    # Extract text
-    all_text = []
-    with pdfplumber.open(pdf_stream) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                lines = [line.strip() for line in text.splitlines() if line.strip()]
-                all_text.extend(lines)
-    
-    # Create CSV in memory and upload to S3
-    df = pd.DataFrame({"LINE": all_text})
-    csv_buffer = io.StringIO()
-    df.to_csv(csv_buffer, index=False)
-    
-    s3.put_object(
-        Bucket=output_bucket,
-        Key=output_key,
-        Body=csv_buffer.getvalue(),
-        ContentType='text/csv'
-    )
-
-def read_csv_head_from_s3(bucket: str, key: str):
-    """Read first 10 rows from CSV file in S3"""
-    s3 = boto3.client('s3')
-    response = s3.get_object(Bucket=bucket, Key=key)
-    csv_content = response['Body'].read().decode('utf-8')
-    
-    csv_df = pd.read_csv(io.StringIO(csv_content))
-    return csv_df.head(10)
-
-def delete_csv_from_s3(bucket: str, key: str):
-    """Delete CSV file from S3"""
-    s3 = boto3.client('s3')
-    s3.delete_object(Bucket=bucket, Key=key)
+warnings.filterwarnings("ignore")
 
 
-from s3_pdf_functions import process_pdf_s3_to_s3, read_csv_head_from_s3, delete_csv_from_s3
+# Function to convert PDF to Text File (S3 Version)
+def pdf_to_text(input_bucket, input_key, output_bucket, output_key):
+    """
+    Function that converts the PDF file from S3 to a 
+    text file in S3.
 
-def main():
-    input_bucket = "simplegeneraluse"
-    input_key = "srcfiles/databricks-certified-data-engineer-associate-exam-guide-25-3.pdf"
-    output_bucket = "simplegeneraluse"
-    output_key = "outputfiles/file.csv"
+    Input: input_bucket (str), input_key (str), output_bucket (str), output_key (str)
+    Output: None (writes text file to S3)
+    """
 
-    
-    # Process PDF and save CSV to S3
-    process_pdf_s3_to_s3(input_bucket, input_key, output_bucket, output_key)
-    
-    # Read head from CSV file in S3
-    csv_head = read_csv_head_from_s3(output_bucket, output_key)
-    print(csv_head)
+    try:
+        s3 = boto3.client('s3')
+        
+        # Get PDF from S3
+        response = s3.get_object(Bucket=input_bucket, Key=input_key)
+        pdf_stream = io.BytesIO(response['Body'].read())
+        
+        # Extract text from PDF
+        text_content = ""
+        with pdfplumber.open(pdf_stream) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text()
+                if text:
+                    text_content += text + "\n"
+        
+        # Upload text file to S3
+        s3.put_object(
+            Bucket=output_bucket,
+            Key=output_key,
+            Body=text_content,
+            ContentType='text/plain'
+        )
+        
+        print(f"Successfully wrote to Text file s3://{output_bucket}/{output_key}")
+    except Exception as e:
+        print(f"Error Converting PDF to text: {e}")
 
-    # Delete CSV file from S3
-    # delete_csv_from_s3(output_bucket, output_key)
 
-if __name__ == "__main__":
-    main()
+# Function to convert Text File to Data Frame (S3 Version)
+def read_text_file(bucket, key):
+    """
+    Function that takes the text file from S3 and converts each line
+    of the file into its own row in a pandas data frame.
+
+    Input: bucket (str), key (str)
+    Output: Data Frame
+    """
+
+    try:
+        s3 = boto3.client('s3')
+        
+        # Get text file from S3
+        response = s3.get_object(Bucket=bucket, Key=key)
+        text_content = response['Body'].read().decode('utf-8')
+        
+        # Split into lines and create DataFrame
+        lines = text_content.splitlines()
+        df = pd.DataFrame({'Line': [line.strip() for line in lines]})
+        return df
+    except Exception as e:
+        print(f"Error Converting text file to Data Frame: {e}")
+
+
+# Function to filter rows between substrings inclusively and recursively
+def filter_rows_between_substrings(df, start_substring, end_substring, column):
+    """
+    Function that filters a data frame for rows
+    between 2 substrings.
+
+    Takes 4 arguments: Original Data frame, beginning substring,
+    ending substring and the column name to filter on
+
+    Input: Data frame, start_substring (str), end_substring (str), column (str)
+    Output: Data frame
+    """
+
+    # Initializes filtered data frame
+    filtered_dfs = []
+    # Filters df for the starting substring
+    start_indices = df[df[column].str.contains(start_substring, na=False)].index
+    # Filters df for the ending substring
+    end_indices = df[df[column].str.contains(end_substring, na=False)].index
+
+    # Loops through starting and ending indices
+    for start, end in zip(start_indices, end_indices):
+        if start < end:  # Ensure valid range
+            # Appends all rows from starting indice to end indice to filtered_df
+            filtered_dfs.append(df.loc[start:end])
+
+    return pd.concat(filtered_dfs, ignore_index=True) if filtered_dfs else pd.DataFrame()
+
+
+# Function to filter rows between substrings inclusively and recursively
+def filter_rows_between_substrings_2(df, start_substring, end_substring, column):
+    """
+    Function that filters a data frame for rows
+    between 2 substrings with a slight variation from 
+    above function.
+
+    Takes 4 arguments: Original Data frame, beginning substring,
+    ending substring and the column name to filter on
+
+    Input: Data frame, start_substring (str), end_substring (str), column (str)
+    Output: Data frame
+    """
+
+    # Initializes filtered data frame
+    filtered_dfs = []
+    # Filters df for matching substring row as starting index
+    start_indices = df[df[column] == start_substring].index
+    # Filters df for rows starting with end substring
+    end_indices = df[df[column].str.startswith(end_substring)].index
+
+    # Loops through starting and ending indices
+    for start, end in zip(start_indices, end_indices):
+        if start <= end:  # Ensure valid range
+            # Appends all rows from starting indice to end indice to filtered_df
+            filtered_dfs.append(df.loc[start:end])
+
+    return pd.concat(filtered_dfs, ignore_index=True) if filtered_dfs else pd.DataFrame()
+
+
+# Extracts Security Account Name
+def extract_securities(df):
+    try:
+        # Check if input is a DataFrame
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("Input must be a pandas DataFrame.")
+        # Ensure Column name is 'Line'
+        required_columns = ['Line']
+        for col in required_columns:
+            if col not in df.columns:
+                raise ValueError(f"Missing required column: {col}")
+        # Confirm Df is valid
+        print("DataFrame is valid. Proceeding with processing...")
+    # Raise exception error for invalid Dfs
+    except (TypeError, ValueError) as e:
+        return (f"Error: {e}")
+
+    # Filters df for the rows that contain "Total For :" and is case sensitive
+    securities = df[df['Line'].str.contains("Total For :", case=True, na=False)]
+    # Splits the row based on the colon and creates Placeholder column
+    securities[['Placeholder', 'Account Name']] = securities['Line'].str.split(':', n=1, expand=True)
+    # Drops Placeholder and Lines columns since they are not needed
+    securities = securities.drop(columns=['Line', 'Placeholder'])
+    # Splits the monetary values based on the dollar sign
+    securities[['Account Name', 'Principal Amount', 'Market Value', 'Book Value', 'Interest Accrued']] = securities['Account Name'].str.split('$', expand=True)
+    # Below values are not needed but kept in case of future needs
+    #securities['Principal Amount'] = securities['Principal Amount'].apply(lambda x: f"${x}")
+    #securities['Market Value'] = securities['Market Value'].apply(lambda x: f"${x}")
+    #securities['Book Value'] = securities['Book Value'].apply(lambda x: f"${x}")
+    #securities['Interest Accrued'] = securities['Interest Accrued'].apply(lambda x: f"${x}")
+    #securities = securities.reset_index(drop=True)
+    #securities = securities[['Account Name', 'Market Value']]
+    #securities = securities[['Account Name']]
+    securities = securities[['Account Name']]
+
+    return securities
+
+
+# Extract PDF As of Date
+def extract_date(df):
+    """
+    Function that filters the data frame for the 
+    AS OF Date in the top right corner of the PDF.
+    In this case, the df row that contains the AS OF
+    phrase.
+
+    Input: Data frame
+    Output: Date frame
+    """
+
+    try:
+        # Check if input is a DataFrame
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("Input must be a pandas DataFrame.")
+        # Ensure Column name is 'Line'
+        required_columns = ['Line']
+        for col in required_columns:
+            if col not in df.columns:
+                raise ValueError(f"Missing required column: {col}")
+        # Confirm Df is valid
+        print("DataFrame is valid. Proceeding with processing...")
+    # Raise exception error for invalid Dfs
+    except (TypeError, ValueError) as e:
+        return (f"Error: {e}")
+
+    # Filters the df for the row that contains AS OF - this filter is case sensitive
+    as_of_date = df[df['Line'].str.contains("AS OF", case=True, na=False)]
+    # Splits the Row based on OF to separate the date from the words
+    as_of_date[['Placeholder', 'As of Date']] = as_of_date['Line'].str.split('OF', n=1, expand=True)
+    # Drops Line and Placeholder columns since they are not needed
+    as_of_date = as_of_date.drop(columns=['Line', 'Placeholder'])
+    as_of_date = as_of_date.reset_index(drop=True)
+
+    return as_of_date
+
+
+# Extracts Mutual Fund Market Value for each account name
+def extract_mutal_fund_mk_val(df):
+    """
+    Function that filters the data frame for
+    all mutual fund market value per security
+    and account name and collateral type.
+
+    Input: Data frame
+    Output: Data frame
+    """
+
+    try:
+        # Check if input is a DataFrame
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("Input must be a pandas DataFrame.")
+        # Ensure Column name is 'Line'
+        required_columns = ['Line']
+        for col in required_columns:
+            if col not in df.columns:
+                raise ValueError(f"Missing required column: {col}")
+        # Confirm Df is valid
+        print("DataFrame is valid. Proceeding with processing...")
+    # Raise exception error for invalid Dfs
+    except (TypeError, ValueError) as e:
+        return (f"Error: {e}")
+
+    # Filters for the Mutual Fund phrase (Includes the whitespace after the word "Fund") Case Sensitive
+    mutual_fund_market_val = df[df['Line'].str.contains("Mutual Fund ", case=True, na=False)]
+    # Splits the monetary values based on the dollar sign
+    mutual_fund_market_val[['Collateral Type', 'Principal Amount', 'Market Value', 'Book Value','Interest Accrued']] = mutual_fund_market_val['Line'].str.split('$', n=4, expand=True)
+    # Drops columns that aren't needed. Only keeps the Market Value column
+    mutual_fund_market_val = mutual_fund_market_val.drop(columns=['Line', 'Principal Amount', 'Book Value', 'Interest Accrued'])
+    # Adds Dollar sign back onto Market Value
+    mutual_fund_market_val['Market Value'] = mutual_fund_market_val['Market Value'].apply(lambda x: f"${x}")
+    mutual_fund_market_val = mutual_fund_market_val.reset_index(drop=True)
+
+    return mutual_fund_market_val
+
+
+# Extracts the Cash Market Value for each account name
+def extract_cash_mk_val(df):
+    """
+    Function that filters the data frame for
+    all mutual fund market value per security
+    and account name and collateral type.
+
+    Input: Data frame
+    Output: Data frame
+    """
+
+    try:
+        # Check if input is a DataFrame
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("Input must be a pandas DataFrame.")
+        # Ensure Column name is 'Line'
+        required_columns = ['Line']
+        for col in required_columns:
+            if col not in df.columns:
+                raise ValueError(f"Missing required column: {col}")
+        # Confirm Df is valid
+        print("DataFrame is valid. Proceeding with processing...")
+    # Raise exception error for invalid Dfs
+    except (TypeError, ValueError) as e:
+        return (f"Error: {e}")
+
+    # Filters for the Rows that start with USD (Includes the whitespace after the word "USD") Case Sensitive
+    usd_market_val = df[df['Line'].str.startswith("USD ")]
+    # Splits the monetary values based on the dollar sign
+    usd_market_val[['Collateral Type', 'Principal Amount', 'Market Value', 'Book Value', 'Interest Accrued']] = usd_market_val['Line'].str.split('$', n=4, expand=True)
+    # Drops columns that aren't needed. Only keeps the Market Value column
+    usd_market_val = usd_market_val.drop(columns=['Line', 'Principal Amount', 'Book Value', 'Interest Accrued'])
+    # Adds Dollar sign back onto Market Value
+    usd_market_val['Market Value'] = usd_market_val['Market Value'].apply(lambda x: f"${x}")
+    usd_market_val = usd_market_val.reset_index(drop=True)
+
+    return usd_market_val
+
+
+# Extract Debentures Market Value for each account name
+def extract_debentures(df):
+    """
+    Function that filters the data frame for
+    all Debentures market value per security
+    and account name and collateral type.
+
+    Input: Data frame
+    Output: Data frame
+    """
+
+    try:
+        # Check if input is a DataFrame
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("Input must be a pandas DataFrame.")
+        # Ensure Column name is 'Line'
+        required_columns = ['Line']
+        for col in required_columns:
+            if col not in df.columns:
+                raise ValueError(f"Missing required column: {col}")
+        # Confirm Df is valid
+        print("DataFrame is valid. Proceeding with processing...")
+    # Raise exception error for invalid Dfs
+    except (TypeError, ValueError) as e:
+        return (f"Error: {e}")
+
+    # Filters for the Debentures phrase (Includes the whitespace after the word "Debentures") Case Sensitive
+    debentures_market_val = df[df['Line'].str.contains("Debentures ", case=True, na=False)]
+    # Splits the monetary values based on the dollar sign
+    debentures_market_val[['Collateral Type', 'Principal Amount', 'Market Value', 'Book Value','Interest Accrued']] = debentures_market_val['Line'].str.split('$', n=4, expand=True)
+    # Drops columns that aren't needed. Only keeps the Market Value column
+    debentures_market_val = debentures_market_val.drop(columns=['Line', 'Principal Amount', 'Book Value', 'Interest Accrued'])
+    # Adds Dollar sign back onto Market Value
+    debentures_market_val['Market Value'] = debentures_market_val['Market Value'].apply(lambda x: f"${x}")
+    debentures_market_val = debentures_market_val.reset_index(drop=True)
+
+    return debentures_market_val
+
+
+# Extract Cash-USD Cusip and Security Description for each account name
+def extract_cash_cusip(df):
+    """
+    Function that extracts both the
+    CUSIP (Cash-USD) and the Security
+    Description (Cash-USD)
+
+    Input: Data frame
+    Output: Data frame
+    """
+
+    try:
+        # Check if input is a DataFrame
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("Input must be a pandas DataFrame.")
+        # Ensure Column name is 'Line'
+        required_columns = ['Line']
+        for col in required_columns:
+            if col not in df.columns:
+                raise ValueError(f"Missing required column: {col}")
+        # Confirm Df is valid
+        print("DataFrame is valid. Proceeding with processing...")
+    # Raise exception error for invalid Dfs
+    except (TypeError, ValueError) as e:
+        return (f"Error: {e}")
+
+    # Filters for the Rows that start with Cash-USD (case sensitive)
+    cusip = df[df['Line'].str.startswith("Cash-USD")]
+    # Drop Duplicate Rows based on created unique id. Keeps the first row
+    cusip = cusip.drop_duplicates(subset='unique_id', keep='first')
+    # SPlits by the 2nd space to obtain Cusip and Security Descriptions
+    cusip[['Cusip', 'Security Description', 'Placeholder']] = cusip['Line'].str.split(' ', n=2, expand=True)
+    # Drops Line and Placeholders columns since they aren't needed
+    cusip = cusip.drop(columns=['Line', 'Placeholder'])
+    cusip = cusip.reset_index(drop=True)
+
+    return cusip
+
+
+# Extract Mutual Fund Cusip and Security Description for each account name
+def extract_mutual_fund_cusip(df):
+    """
+    Function that extracts both the
+    CUSIP (Mutual Fund) and the Security
+    Description (Mutual Fund)
+
+    Input: Data frame
+    Output: Data frame
+    """
+
+    try:
+        # Check if input is a DataFrame
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("Input must be a pandas DataFrame.")
+        # Ensure Column name is 'Line'
+        required_columns = ['Line']
+        for col in required_columns:
+            if col not in df.columns:
+                raise ValueError(f"Missing required column: {col}")
+        # Confirm Df is valid
+        print("DataFrame is valid. Proceeding with processing...")
+    # Raise exception error for invalid Dfs
+    except (TypeError, ValueError) as e:
+        return (f"Error: {e}")
+
+    # Uses filter_rows_between_substrings_2 to filter between the Mutual Fund and Mutual Fund $ rows
+    cusip_mutual_fund = filter_rows_between_substrings_2(df, "Mutual Fund", "Mutual Fund $", "Line")
+    # Removes the first row that contains Mutual Fund (Case Sensitive)
+    cusip_mutual_fund = cusip_mutual_fund[~cusip_mutual_fund['Line'].str.contains("Mutual Fund", case=True, na=False)]
+    # Removes rows that contains Aaa (if present)
+    cusip_mutual_fund = cusip_mutual_fund[~cusip_mutual_fund['Line'].str.contains("Aaa", case=True, na=False)]
+    # Creates new column is_main to split the cusip from the values
+    cusip_mutual_fund['is_main'] = cusip_mutual_fund['Line'].str.split().str.len() >= 10
+
+    # Main is the first row of the cusip (Ex. 20036X103 Comerica Securities)
+    main = cusip_mutual_fund[cusip_mutual_fund['is_main']].copy()
+    # Extra is the 2nd and 3rd lines of the Cusip (Ex. Lending Collateral Stif Cif Pool One) 
+    extra = cusip_mutual_fund[~cusip_mutual_fund['is_main']].copy()
+    # Splits the Cusip from the beginning of the security description on the first space
+    main[['Cusip', 'security description']] = main['Line'].str.split(' ', n=1, expand=True)
+    # SPlits the security descrption based on the first % symbol
+    main[['security description', 'placeholder']] = main['security description'].str.split('%', n=1, expand=True)
+    # Drops the Line, placeholder and is_main columns. Only keeps the Cusip and security description
+    main = main.drop(columns=['Line', 'placeholder', 'is_main'])
+
+    # Replaces the N/R with empty spaces
+    extra['Line'] = extra['Line'].str.replace("N/R N/R N/R", "", regex=False)
+    # Replaces numbers with empty spaces in the security description
+    main['security description'] = main['security description'].str.replace(r'\d.*', '', regex=True)
+
+    # Initializes trigger phrase for combining extra cusip lines
+    trigger_phrase = "LENDING COLLATERAL"
+    trigger_idx = extra[extra['Line'] == trigger_phrase].index
+
+    # Initializes rows to drop
+    rows_to_drop = []
+    # Loops through Trigger index
+    for idx in trigger_idx:
+        # Adds the extra line to index
+        if idx + 1 in extra.index:
+            # Combines the extra lines together
+            extra.at[idx, 'Line'] = extra.at[idx, 'Line'] + ' ' + extra.at[idx + 1, 'Line']
+            # Appends unnecessary lines to rows_to_drop
+            rows_to_drop.append(idx + 1)
+    # Drops rows_to_drop from extra df
+    extra = extra.drop(rows_to_drop).reset_index(drop=True)
+    main = main.reset_index(drop=True)
+    # Drops not required columns
+    extra = extra.drop(columns=['is_main', 'unique_id'])
+    # Combines the main and extra dfs
+    final_cusip = pd.concat([main, extra], axis=1)
+    # Combines the multiple line security descriptions
+    final_cusip['Security Description'] = final_cusip['security description'] + ' ' + final_cusip['Line']
+    final_cusip = final_cusip.drop(columns=['Line', 'security description'])
+
+    return final_cusip
+
+
+# Extract Debenture Cusip and Security Description
+def extract_debenture_cusip(df):
+    """
+    Function that extracts both the
+    CUSIP (Debenture) and the Security
+    Description (Debenture)
+
+    Input: Data frame
+    Output: Data frame
+    """
+
+    try:
+        # Check if input is a DataFrame
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("Input must be a pandas DataFrame.")
+        # Ensure Column name is 'Line'
+        required_columns = ['Line']
+        for col in required_columns:
+            if col not in df.columns:
+                raise ValueError(f"Missing required column: {col}")
+        # Confirm Df is valid
+        print("DataFrame is valid. Proceeding with processing...")
+    # Raise exception error for invalid Dfs
+    except (TypeError, ValueError) as e:
+        return (f"Error: {e}")
+
+    # Set target filter the df for the Debentures word (Debentures is the on value in row)
+    target = df['Line'] == 'Debentures'
+    # Filter the df for the row after target (Row that contains the cusip and security descriptions of the Debenture)
+    debenture_cusip = df[target.shift(1, fill_value=False)]
+    # Split the cusip and security description based on the first space
+    debenture_cusip[['Cusip', 'Security Description']] = debenture_cusip['Line'].str.split(' ', n=1, expand=True)
+    # Convert everything after the first number to empty whitespace
+    debenture_cusip['Security Description'] = debenture_cusip['Security Description'].str.replace(r'\d.*', '', regex=True)
+    # Drop the Line column
+    debenture_cusip = debenture_cusip.drop(columns=['Line'])
+
+    return debenture_cusip
+
+import PDF_to_CSV_functions
+import pandas as pd
+
+# S3 Configuration
+input_bucket = "your-input-bucket"
+pdf_key = "INV0236-CollateralInvestmentSummaryByTA_2025-08-14_06-12-06-AM_Q587367.pdf"
+output_bucket = "your-output-bucket"
+txt_key = "output.txt"
+
+# Convert PDF to Text File (S3)
+PDF_to_CSV_functions.pdf_to_text(input_bucket, pdf_key, output_bucket, txt_key)
+df = PDF_to_CSV_functions.read_text_file(output_bucket, txt_key) # Convert Text File to Data frame
+
+# Initialize start_substring and end_substring
+start_substring = 'AS OF'
+end_substring = 'Total For :'
+
+# Apply the function to filter between AS OF Date and Account Name rows
+result = PDF_to_CSV_functions.filter_rows_between_substrings(df, start_substring, end_substring, "Line")
+result = result[(result['Line'] != 'Accrued') & (result['Line'] != 'MOODY S&P FITCH')]
+
+
+# Create a unique ID column 
+unique_id = 0
+ids = []
+inside_group = False
+
+for row in result['Line']:
+    if start_substring in row:
+        unique_id += 1
+        inside_group = True
+    ids.append(unique_id if inside_group else 0)
+    if end_substring in row:
+        inside_group = False
+
+# Creates unique id where each ID represents page number of PDF
+result['unique_id'] = ids
+
+# Applies the extract_securities function to the result df
+account_name = PDF_to_CSV_functions.extract_securities(result)
+# Applies the extract_date function to the result df
+date = PDF_to_CSV_functions.extract_date(result)
+# Combines the As of Date and the Account Name into a single Df
+acct_name_date = pd.concat([date, account_name], axis=1, ignore_index=False)
+
+# Applies the extract_mutual_fund_mk_val function to the result df
+mutual_fund_mk_val = PDF_to_CSV_functions.extract_mutal_fund_mk_val(result)
+# Applies the extract_cash_mk_val function to the result df
+cash_mk_val = PDF_to_CSV_functions.extract_cash_mk_val(result)
+# Applies the extract_debentures_mk_val function to the result df
+debentures_mk_val = PDF_to_CSV_functions.extract_debentures(result)
+# Combines the 3 market value data frame together and sorts by unique id (page number)
+collateral = pd.concat([mutual_fund_mk_val, cash_mk_val, debentures_mk_val])
+collateral = collateral.sort_values(by=['unique_id'], ascending=[True]).reset_index(drop=True)
+
+# Applies the extract_cash_cusip function to the result df
+cash_cusip = PDF_to_CSV_functions.extract_cash_cusip(result)
+# Applies the extract_mutual_fund_cusip function to the result df
+mutual_fund_cusip = PDF_to_CSV_functions.extract_mutual_fund_cusip(result)
+# Applies the extract_debenture_cusip function to the result df
+debenture_cusip = PDF_to_CSV_functions.extract_debenture_cusip(result)
+# Combines the 3 Cusip/Security Description dfs together and sorts by unique id (page number)
+combined_cusip = pd.concat([mutual_fund_cusip, cash_cusip, debenture_cusip], axis=0, ignore_index=False)
+combined_cusip = combined_cusip.sort_values(by=['unique_id'], ascending=[True]).reset_index(drop=True)
+combined_cusip = combined_cusip.drop(columns=['unique_id'])
+
+# Combines the Market Value, and Cusip/Security Descriptions dfs together
+security_table = pd.concat([combined_cusip, collateral], axis=1)
+# Joins the As of Date/Account Name df with the Market Value and Cusip/Security Description df based on unique id
+new_security_table = pd.merge(acct_name_date, security_table, on='unique_id', how='right')
+
+# Writes the final df to a csv file
+new_security_table.to_csv("Securities_Lending_Output-8-13-2025.csv", index=False)
+print("PDF converted to CSV")
