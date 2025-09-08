@@ -1,0 +1,29 @@
+# Function to convert PDF directly to DataFrame (S3 Version)
+def pdf_to_df(input_bucket, input_key):
+    """
+    Function that converts the PDF file from S3 directly to DataFrame.
+
+    Input: input_bucket (str), input_key (str)
+    Output: DataFrame
+    """
+
+    try:
+        s3 = boto3.client('s3')
+        
+        # Get PDF from S3
+        response = s3.get_object(Bucket=input_bucket, Key=input_key)
+        pdf_stream = io.BytesIO(response['Body'].read())
+        
+        # Extract text from PDF and create DataFrame
+        lines = []
+        with pdfplumber.open(pdf_stream) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text()
+                if text:
+                    page_lines = [line.strip() for line in text.splitlines() if line.strip()]
+                    lines.extend(page_lines)
+        
+        df = pd.DataFrame({'Line': lines})
+        return df
+    except Exception as e:
+        print(f"Error Converting PDF to DataFrame: {e}")
