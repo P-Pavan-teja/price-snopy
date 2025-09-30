@@ -1,0 +1,354 @@
+-- Create config table (if not already)
+create schema if not exists PUBLIC_OBF;
+
+create or replace table PUBLIC_OBF.OBF_CFG_COLUMNS (
+  dataset_name  string,
+  source_db     string,
+  source_schema string,
+  source_table  string,
+  column_name   string,
+  data_type     string,
+  max_length    integer,
+  obf_rule      string,
+  obf_params    variant,      -- << VARIANT
+  scope_key     string,
+  enabled       boolean default true
+);
+
+
+-- Insert only first 5 config rows for CUSTOMER
+insert into PUBLIC_OBF.OBF_CFG_COLUMNS
+(dataset_name, source_db, source_schema, source_table, column_name, data_type, max_length, obf_rule, obf_params, scope_key, enabled)
+select 'TPCH_CUSTOMER','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_CUSTKEY','NUMBER',null,'KEEP',
+       NULL::VARIANT,'CUSTOMER.KEY', true
+union all
+select 'TPCH_CUSTOMER','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_NAME','STRING',25,'SCRAMBLE_WORDS',
+       PARSE_JSON('{"variant":"INTERNAL_SHUFFLE_KEEP_FIRST_LAST"}'),'GLOBAL_PERSON_NAMES', true
+union all
+select 'TPCH_CUSTOMER','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_ADDRESS','STRING',40,'SCRAMBLE_WORDS',
+       PARSE_JSON('{"variant":"FULL_SHUFFLE"}'),'CUSTOMER.ADDRESS', true
+union all
+select 'TPCH_CUSTOMER','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_NATIONKEY','NUMBER',null,'KEEP',
+       NULL::VARIANT,'CUSTOMER.NATION', true
+union all
+select 'TPCH_CUSTOMER','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_PHONE','STRING',15,'MASK_LASTN',
+       PARSE_JSON('{"n":4,"mask_char":"X"}'),'CUSTOMER.PHONE', true;
+
+-- Check results
+select * 
+from PUBLIC_OBF.OBF_CFG_COLUMNS
+where dataset_name = 'TPCH_CUSTOMER'
+order by column_name;
+
+-- Insert rows using SELECT + PARSE_JSON (and NULL::VARIANT where needed)
+insert into PUBLIC_OBF.OBF_CFG_COLUMNS
+(dataset_name, source_db, source_schema, source_table, column_name, data_type, max_length, obf_rule, obf_params, scope_key, enabled)
+select 'TPCH_CUSTOMER','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_CUSTKEY','NUMBER',null,'KEEP',            NULL::VARIANT,'CUSTOMER.KEY',       true
+union all
+select 'TPCH_CUSTOMER','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_NAME',   'STRING',25,  'SCRAMBLE_WORDS', PARSE_JSON('{"variant":"INTERNAL_SHUFFLE_KEEP_FIRST_LAST"}'), 'GLOBAL_PERSON_NAMES', true
+union all
+select 'TPCH_CUSTOMER','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_ADDRESS','STRING',40,  'SCRAMBLE_WORDS', PARSE_JSON('{"variant":"FULL_SHUFFLE"}'),                     'CUSTOMER.ADDRESS',    true
+union all
+select 'TPCH_CUSTOMER','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_NATIONKEY','NUMBER',null,'KEEP',         NULL::VARIANT,'CUSTOMER.NATION',    true
+union all
+select 'TPCH_CUSTOMER','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_PHONE',  'STRING',15,  'MASK_LASTN',     PARSE_JSON('{"n":4,"mask_char":"X"}'),                        'CUSTOMER.PHONE',      true
+union all
+select 'TPCH_CUSTOMER','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_ACCTBAL','NUMBER',null,'KEEP',           NULL::VARIANT,'CUSTOMER.ACCTBAL',   true
+union all
+select 'TPCH_CUSTOMER','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_MKTSEGMENT','STRING',10,'HASH_DETERMINISTIC', PARSE_JSON('{"salt_name":"PII_SALT_V1"}'),              'CUSTOMER.MKTSEGMENT', true
+union all
+select 'TPCH_CUSTOMER','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_COMMENT','STRING',117,'NULLIFY',         NULL::VARIANT,'CUSTOMER.COMMENT',   true;
+
+-- Verify
+select * from PUBLIC_OBF.OBF_CFG_COLUMNS
+where dataset_name = 'TPCH_CUSTOMER'
+order by column_name;
+
+insert into PUBLIC_OBF.OBF_CFG_COLUMNS
+(dataset_name, source_db, source_schema, source_table, column_name, data_type, max_length, obf_rule, obf_params, scope_key, enabled)
+-- 1) KEEP on numeric PK
+select 'TPCH_CUSTOMER_5RULES','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_CUSTKEY','NUMBER',null,
+       'KEEP', NULL::VARIANT,'TEST.KEEP', true
+union all
+-- 2) NULLIFY on numeric (easy to inspect)
+select 'TPCH_CUSTOMER_5RULES','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_NATIONKEY','NUMBER',null,
+       'NULLIFY', NULL::VARIANT,'TEST.NULLIFY', true
+union all
+-- 3) MASK_FIXED on address (mask all chars with '*')
+select 'TPCH_CUSTOMER_5RULES','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_ADDRESS','STRING',40,
+       'MASK_FIXED', PARSE_JSON('{"mask_char":"*"}'),'TEST.MASK_FIXED', true
+union all
+-- 4) MASK_LASTN on phone (keep last 4)
+select 'TPCH_CUSTOMER_5RULES','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_PHONE','STRING',15,
+       'MASK_LASTN', PARSE_JSON('{"n":4,"mask_char":"X"}'),'TEST.MASK_LASTN', true
+union all
+-- 5) MASK_FIRSTN on name (keep first 3)
+select 'TPCH_CUSTOMER_5RULES','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER','C_NAME','STRING',25,
+       'MASK_FIRSTN', PARSE_JSON('{"n":3,"mask_char":"X"}'),'TEST.MASK_FIRSTN', true;
+
+insert into PUBLIC_OBF.OBF_CFG_COLUMNS
+(dataset_name, source_db, source_schema, source_table, column_name, data_type, max_length, obf_rule, obf_params, scope_key, enabled)
+-- Internal shuffle (keep first/last)
+select 'TPCH_CUSTOMER_SCRAMBLE_TEST','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER',
+       'C_NAME','STRING',25,'SCRAMBLE_WORDS',
+       parse_json('{"variant":"INTERNAL_SHUFFLE_KEEP_FIRST_LAST"}'),
+       'SCOPE.C_NAME', true
+union all
+-- Full shuffle (scramble all chars)
+select 'TPCH_CUSTOMER_SCRAMBLE_TEST','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER',
+       'C_ADDRESS','STRING',40,'SCRAMBLE_WORDS',
+       parse_json('{"variant":"FULL_SHUFFLE"}'),
+       'SCOPE.C_ADDRESS', true
+union all
+-- Rotate left
+select 'TPCH_CUSTOMER_SCRAMBLE_TEST','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER',
+       'C_COMMENT','STRING',117,'SCRAMBLE_WORDS',
+       parse_json('{"variant":"ROTATE_LEFT"}'),
+       'SCOPE.C_COMMENT', true
+union all
+-- Rotate right
+select 'TPCH_CUSTOMER_SCRAMBLE_TEST','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER',
+       'C_MKTSEGMENT','STRING',10,'SCRAMBLE_WORDS',
+       parse_json('{"variant":"ROTATE_RIGHT"}'),
+       'SCOPE.C_MKTSEGMENT', true
+union all
+-- Reverse
+select 'TPCH_CUSTOMER_SCRAMBLE_TEST','SNOWFLAKE_SAMPLE_DATA','TPCH_SF1','CUSTOMER',
+       'C_PHONE','STRING',15,'SCRAMBLE_WORDS',
+       parse_json('{"variant":"REVERSE"}'),
+       'SCOPE.C_PHONE', true;
+
+# ===========================
+#  Obfuscation Framework (Notebook, minimal deps)
+# ===========================
+# Stdlib only + built-in Snowpark session `session`
+import re, random, hashlib, json
+from typing import Optional
+from snowflake.snowpark.session import Session
+
+# ---------- 0) SETTINGS ----------
+DATASET = "TPCH_CUSTOMER_SCRAMBLE_TEST"   # <-- change to your dataset name
+SOURCE  = "SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER"
+SALT    = "TEST_SALT"                      # <-- for practice only; store securely in prod
+
+# ---------- 1) BASIC RULES ----------
+def keep(value: Optional[str]) -> Optional[str]:
+    return value
+
+def nullify(value: Optional[str]) -> None:
+    return None
+
+def mask_fixed(value: Optional[str], mask_char: str = "X") -> Optional[str]:
+    if value is None:
+        return None
+    return mask_char * len(str(value))
+
+def mask_lastn(value: Optional[str], n: int = 4, mask_char: str = "X") -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value)
+    if len(s) <= n:
+        return s
+    return (mask_char * (len(s) - n)) + s[-n:]
+
+def mask_firstn(value: Optional[str], n: int = 4, mask_char: str = "X") -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value)
+    if len(s) <= n:
+        return s
+    return s[:n] + (mask_char * (len(s) - n))
+
+# ---------- 2) SCRAMBLE HELPERS ----------
+# Tokenizer: treat letter/digit groups as tokens; punctuation/separators kept verbatim.
+# Examples matched as single tokens: "Pavan", "O'Neil", "Jean-Luc", "12345", "A1B2"
+TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['\-][A-Za-z0-9]+)*")
+
+def _case_pattern(w: str) -> str:
+    # Detect casing for alphabetic tokens to reapply later
+    letters = ''.join(ch for ch in w if ch.isalpha())
+    if not letters:
+        return 'NA'  # no letters (digits only)
+    if letters.isupper():
+        return 'UP'
+    if letters.islower():
+        return 'LO'
+    if letters[0].isupper() and letters[1:].islower():
+        return 'TI'
+    return 'MX'
+
+def _apply_case(w: str, pattern: str) -> str:
+    if pattern == 'UP': return w.upper()
+    if pattern == 'LO': return w.lower()
+    if pattern == 'TI':
+        out, first = [], True
+        for ch in w:
+            if ch.isalpha() and first:
+                out.append(ch.upper()); first = False
+            elif ch.isalpha():
+                out.append(ch.lower())
+            else:
+                out.append(ch)
+        return ''.join(out)
+    return w  # MX or NA: leave as-is
+
+def _seed_int(scope_key: str, token: str, salt: str) -> int:
+    src = f"{scope_key}|{token}|{salt}".encode("utf-8")
+    return int(hashlib.sha256(src).hexdigest(), 16)
+
+def _internal_shuffle_letters(base: str, scope_key: str, salt: str) -> str:
+    # keep first/last letter, shuffle middle; works on LOWERCASED letters
+    if len(base) <= 2:
+        return base
+    first, last = base[0], base[-1]
+    mid = list(base[1:-1])
+    rng = random.Random(_seed_int(scope_key, base, salt))
+    rng.shuffle(mid)
+    return first + ''.join(mid) + last
+
+def _full_shuffle_chars(base: str, scope_key: str, salt: str) -> str:
+    if len(base) <= 1:
+        return base
+    chars = list(base)
+    rng = random.Random(_seed_int(scope_key, base, salt))
+    rng.shuffle(chars)
+    return ''.join(chars)
+
+def _rotate_chars(base: str, scope_key: str, salt: str, direction: str = "left") -> str:
+    n = len(base)
+    if n <= 1:
+        return base
+    k = _seed_int(scope_key, base, salt) % n
+    if k == 0:
+        k = 1  # avoid identity
+    if direction == "right":
+        k = n - k
+    return base[k:] + base[:k]
+
+def _reverse_chars(base: str) -> str:
+    return base[::-1]
+
+def _scramble_token(token: str, scope_key: str, salt: str, variant: str) -> str:
+    # Split handling: digits-only vs contains letters
+    is_digits = token.isdigit()
+    if is_digits:
+        # For pure digits, do not lowercase; apply char transforms directly
+        base = token
+        if variant == "FULL_SHUFFLE":
+            return _full_shuffle_chars(base, scope_key, salt)
+        elif variant == "ROTATE_LEFT":
+            return _rotate_chars(base, scope_key, salt, "left")
+        elif variant == "ROTATE_RIGHT":
+            return _rotate_chars(base, scope_key, salt, "right")
+        elif variant == "REVERSE":
+            return _reverse_chars(base)
+        else:  # INTERNAL shuffle doesn't make sense for digits -> do FULL_SHUFFLE deterministically
+            return _full_shuffle_chars(base, scope_key, salt)
+    else:
+        # Alphabetic or alphanumeric: preserve case pattern on letters
+        pat  = _case_pattern(token)
+        # operate in lowercase to keep deterministic mapping on letters
+        letters_lower = ''.join(ch.lower() if ch.isalpha() else ch for ch in token)
+        # apply variant on the whole token (letters and digits), but first/last preservation is for letters only
+        if variant == "FULL_SHUFFLE":
+            out = _full_shuffle_chars(letters_lower, scope_key, salt)
+        elif variant == "ROTATE_LEFT":
+            out = _rotate_chars(letters_lower, scope_key, salt, "left")
+        elif variant == "ROTATE_RIGHT":
+            out = _rotate_chars(letters_lower, scope_key, salt, "right")
+        elif variant == "REVERSE":
+            out = _reverse_chars(letters_lower)
+        else:  # INTERNAL_SHUFFLE_KEEP_FIRST_LAST on letters; keep non-letters in place logically
+            # To approximate "keep first/last LETTER", we find first/last alphabetic char positions
+            chars = list(letters_lower)
+            # Extract indices of alphabetic positions
+            alpha_idx = [i for i,ch in enumerate(chars) if ch.isalpha()]
+            if len(alpha_idx) <= 2:
+                out = letters_lower
+            else:
+                first_i, last_i = alpha_idx[0], alpha_idx[-1]
+                mid_idx = alpha_idx[1:-1]
+                mid_vals = [chars[i] for i in mid_idx]
+                rng = random.Random(_seed_int(scope_key, ''.join(chars), salt))
+                rng.shuffle(mid_vals)
+                # write back shuffled letters
+                for i, j in enumerate(mid_idx):
+                    chars[j] = mid_vals[i]
+                out = ''.join(chars)
+        # Reapply case on letters only
+        return _apply_case(out, pat)
+
+def scramble_words(text: Optional[str], scope_key: str, salt: str,
+                   variant: str = "INTERNAL_SHUFFLE_KEEP_FIRST_LAST") -> Optional[str]:
+    if text is None:
+        return None
+    out = []
+    last = 0
+    for m in TOKEN_RE.finditer(text):
+        if m.start() > last:
+            out.append(text[last:m.start()])  # separator chunk
+        tok = m.group(0)
+        out.append(_scramble_token(tok, scope_key, salt, variant))
+        last = m.end()
+    if last < len(text):
+        out.append(text[last:])
+    return ''.join(out)
+
+# ---------- 3) DISPATCHER ----------
+def apply_rule_value(rule_name: str, value, obf_params, scope_key: str, salt: str):
+    params = {}
+    if obf_params is not None:
+        try:
+            params = json.loads(str(obf_params))
+        except Exception:
+            params = {}
+    if rule_name == "KEEP":
+        return keep(value)
+    if rule_name == "NULLIFY":
+        return nullify(value)
+    if rule_name == "MASK_FIXED":
+        return mask_fixed(value, **params)
+    if rule_name == "MASK_LASTN":
+        return mask_lastn(value, **params)
+    if rule_name == "MASK_FIRSTN":
+        return mask_firstn(value, **params)
+    if rule_name == "SCRAMBLE_WORDS":
+        variant = params.get("variant", "INTERNAL_SHUFFLE_KEEP_FIRST_LAST")
+        return scramble_words(value, scope_key, salt, variant)
+    # Fallback: no change
+    return value
+
+# ---------- 4) LOAD CONFIG + DATA ----------
+cfg_df = session.table("PUBLIC_OBF.OBF_CFG_COLUMNS") \
+    .filter(f"dataset_name = '{DATASET}' AND enabled = TRUE") \
+    .select("COLUMN_NAME","OBF_RULE","OBF_PARAMS","SCOPE_KEY")
+cfg_rows = cfg_df.collect()
+
+src_df = session.table(SOURCE).limit(10)
+pdf = src_df.to_pandas()
+obf = pdf.copy()
+
+# ---------- 5) APPLY RULES PER CONFIG ----------
+for r in cfg_rows:
+    col   = r["COLUMN_NAME"]
+    rule  = r["OBF_RULE"]
+    params= r["OBF_PARAMS"]
+    scope = r["SCOPE_KEY"] or col
+    if col in obf.columns:
+        obf[col] = obf[col].apply(lambda v: apply_rule_value(rule, v, params, scope, SALT))
+
+# ---------- 6) BUILD BEFORE/AFTER COMPARISON DF ----------
+cfg_cols = [r["COLUMN_NAME"] for r in cfg_rows if r["COLUMN_NAME"] in pdf.columns]
+compare_df = pdf[cfg_cols].copy()
+for col in cfg_cols:
+    compare_df[f"{col}_OBF"] = obf[col]
+
+# Interleave ORIGINAL / OBF columns for readability
+interleaved = []
+for c in cfg_cols:
+    interleaved += [c, f"{c}_OBF"]
+compare_df = compare_df[interleaved]
+
+# Show result
+print("=== BEFORE / AFTER (first 10 rows) ===")
+print(compare_df.to_string(index=False))
