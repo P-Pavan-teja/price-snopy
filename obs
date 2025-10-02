@@ -1,73 +1,18 @@
-Perfect! I’ve completely rewritten the code to meet all your requirements. Here’s what’s included:
+🔑 Core Rules
+	1.	KEEP – leave column as-is.
+	2.	NULLIFY – replace with NULL or empty string.
+	3.	MASK_FIXED – mask all/part of the value with X/*.
+	4.	MASK_LASTN – show only the last N characters.
+	5.	MASK_FIRSTN – show only the first N characters.
 
-## Key Features:
+⸻
 
-### 1. **Format Preserving Encryption** ✓
-
-- Maintains original format and length
-- SSN “123-45-6789” → “847-92-3156” (still looks like SSN)
-- Credit cards, phone numbers, etc. all preserve their format
-
-### 2. **Reusability** ✓
-
-- `DataEncryptor` class works with any data source
-- Methods for CSV files, DataFrames, and individual values
-- Easy to integrate into existing workflows
-
-### 3. **Data Dictionary** ✓
-
-- Built-in data dictionary identifies sensitive fields automatically
-- Supports custom data dictionary via JSON file
-- Encrypts only marked sensitive fields
-
-## Usage Examples:
-
-**Basic Usage:**
-
-```python
-# Initialize encryptor
-encryptor = DataEncryptor()
-
-# Encrypt a CSV file
-encryptor.encrypt_csv('input.csv', 'encrypted_output.csv')
-
-# Decrypt a CSV file
-encryptor.decrypt_csv('encrypted_output.csv', 'decrypted_output.csv')
-```
-
-**With Custom Data Dictionary:**
-
-```python
-# Create custom_dictionary.json with your field definitions
-encryptor = DataEncryptor(data_dictionary_path='custom_dictionary.json')
-```
-
-**Working with DataFrames:**
-
-```python
-# Encrypt DataFrame
-encrypted_df = encryptor.encrypt_dataframe(df)
-
-# Decrypt DataFrame
-decrypted_df = encryptor.decrypt_dataframe(encrypted_df)
-```
-
-**Key Management:**
-
-```python
-# Save key
-encryptor.save_key('my_key.bin')
-
-# Load existing key
-key = DataEncryptor.load_key('my_key.bin')
-encryptor = DataEncryptor(key=key)
-```
-
-## Built-in Sensitive Fields:
-
-- SSN, Credit Card, Phone Number, Email
-- Customer ID, Account Number, Routing Number
-- Passport, Driver’s License, Date of Birth
-- And more…
-
-Run the script to see it in action with sample data!
+🔄 Scrambling / Shuffling Rules
+	6.	SCRAMBLE_WORDS_FULL – shuffle all characters in a word.
+	7.	SCRAMBLE_WORDS_INTERNAL – shuffle middle characters, keep first/last.
+	8.	SCRAMBLE_WORDS_ROTATE – rotate characters by k (left or right).
+	9.	SCRAMBLE_WORDS_REVERSE – reverse the word.
+	10.	SCRAMBLE_WORDS_BLOCKS – break into chunks/syllables and shuffle.
+	11.	SCRAMBLE_DIGITS – scramble digits, keep letters.
+	12.	SCRAMBLE_ALPHANUM – split letters/numbers, scramble separately.
+	13.	SCRAMBLE_COLUMN_VALUES – shuffle values among rows in the column.
