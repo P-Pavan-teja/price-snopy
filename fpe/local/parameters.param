@@ -1,0 +1,8 @@
+# all log files
+log_file = /Users/pavanteja/data_engineering/obfuscation/python_files/logs/
+output_file = /Users/pavanteja/data_engineering/obfuscation/python_files/outputfiles/encrypted_data_2.csv
+dict_path = /Users/pavanteja/data_engineering/obfuscation/python_files/dictionaryfiles/data_dictionary.csv
+encryption_key = /Users/pavanteja/data_engineering/obfuscation/python_files/keys/custom_project_key.bin
+decrypted_path = /Users/pavanteja/data_engineering/obfuscation/python_files/decrypted_files
+source_path = /Users/pavanteja/data_engineering/obfuscation/sample_data/customer.xlsx
+source_sheet_path = sample_2
