@@ -1,0 +1,6 @@
+field_name,type,format,description
+social_security_number,numeric,999-99-9999,Social Security Number
+credit_card,numeric,9999-9999-9999-9999,Credit Card Number
+phone,numeric,(999) 999-9999,Phone Number
+email,alphanumeric,,Email Address
+account_number,numeric,99999999,Bank Account Number
