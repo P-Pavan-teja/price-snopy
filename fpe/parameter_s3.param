@@ -1,0 +1,10 @@
+# keys
+enc_bucket = fpe-keys-storage-bucket
+enc_s3_key = testing_data/custom_project_key.bin
+
+# source, target, log, dictionary files
+bucket = fpe-source-target-dict-files
+source_key = srcfiles/customer.xlsx
+dict_key = dict_files/data_dictionary.csv
+log_key = logs/
+output_key = tgtfiles/
