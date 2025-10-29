@@ -1,29 +1,19 @@
-/* =======================================================================
-   Monthly file visibility logic (covers ALL 3 scenarios)
+/* ================================================
+   DAY_PARAM = Dashboard reference day (today = 20)
+   DAY_OF_EMAIL = Actual business schedule day per file
 
-   Scenarios (DAY_PARAM = 20 in this example):
-   1) File should come today AND we got it today  -> show Success today.
-   2) File should NOT come today (scheduled on DAY_PARAM) but arrived EARLY
-      (before DAY_PARAM) -> show Success today AND show it again on DAY_PARAM.
-   3) File should come on DAY_PARAM but arrives LATE (after DAY_PARAM) ->
-      from DAY_PARAM up to the actual arrival day show "Failed / missing";
-      on the day it finally arrives show Success and stop showing Missing.
+   Rules:
+   ======
+   Show a row ONLY IF:
+   1) ARRIVED TODAY  → Success
+   2) (DAY_PARAM = DAY_OF_EMAIL) AND NOT ARRIVED → Failed
+   Everything else → NO ROW
+   ================================================ */
 
-   Notes:
-   - “Arrived today” = FILE_ENDTIME_EST within the last 24 hours from now.
-   - We cap DAY_PARAM to the last day of the current month to avoid invalid dates
-     (e.g., DAY_PARAM=31 in Feb). That capped value is used to build SCHED_DATE.
-   - This query is intended to be run once per day. It returns:
-       • one row for “today” (Success or Missing)
-       • plus a future-dated row ON the scheduled day if the file arrived early
-   ======================================================================= */
-
--- 0) Parameter CTE (hard-code here; in a proc, pass as an argument)
 WITH PARAM AS (
-  SELECT 20::NUMBER AS DAY_PARAM    -- <== replace 20 with your expected day if needed
+  SELECT 20::NUMBER AS DAY_PARAM   -- Hard coded today for testing
 ),
 
--- 1) Raw data from your previous step
 RAW AS (
   SELECT r.*
   FROM TABLE(RESULT_SCAN('01c009be-0003-c2f4-0005-64d202f2f296')) r
@@ -31,100 +21,53 @@ RAW AS (
     AND UPPER(r.SOURCE_FREQ) = 'MONTHLY'
 ),
 
--- 2) Flags & derived schedule date
 FLAGS AS (
   SELECT
       r.*,
       p.DAY_PARAM,
-      /* Cap the scheduled day to last day of this month (31 vs 30 vs Feb) */
-      LEAST(p.DAY_PARAM, DAY(LAST_DAY(CURRENT_DATE())))                                  AS SCHED_DAY_CAPPED,
-      DAY(CURRENT_DATE())                                                                AS TODAY_DAY,
-      /* Build a valid scheduled date in this month */
-      DATE_FROM_PARTS(YEAR(CURRENT_DATE()), MONTH(CURRENT_DATE()), 
-                      LEAST(p.DAY_PARAM, DAY(LAST_DAY(CURRENT_DATE()))))                 AS SCHED_DATE,
-      /* Did the file arrive within the last 24 hours? */
-      (FILE_ENDTIME_EST >= DATEADD(HOUR, -24, CURRENT_TIMESTAMP()))                      AS ARRIVED_TODAY
+      DAY_OF_EMAIL::NUMBER AS SCHED_DAY,       -- business expected day
+      DAY(CURRENT_DATE()) AS TODAY_DAY,
+      /* Did we receive file in last 24h? */
+      (FILE_ENDTIME_EST >= DATEADD(HOUR, -24, CURRENT_TIMESTAMP())) AS ARRIVED_TODAY
   FROM RAW r
   CROSS JOIN PARAM p
-),
-
-/* -----------------------------------------------------------------------
-   3) Row for TODAY
-   - If arrived in the last 24h -> Success row for today
-   - Else if today is on/after scheduled day -> Missing row for today
-   - Else (before scheduled day and nothing arrived) -> no row today
-   ----------------------------------------------------------------------- */
-TODAY_ROWS AS (
-  SELECT
-      /* Load date to display on dashboard for TODAY context */
-      IFF(ARRIVED_TODAY, CURRENT_DATE(),
-          IFF(TODAY_DAY >= SCHED_DAY_CAPPED, CURRENT_DATE(), NULL)
-      ) AS LOAD_DATE,
-
-      SOURCE_FREQ,
-      LOAD_DATA_CATEGORY,
-
-      /* Only show real dates/metrics when Success */
-      IFF(ARRIVED_TODAY, ACCOUNTING_DATE, NULL) AS ACCOUNTING_DATE,
-      IFF(ARRIVED_TODAY, SOURCE_FILE_NAME, '**') AS SOURCE_FILE_NAME,
-      IFF(ARRIVED_TODAY, TARGET_NAME,      '**') AS TARGET_NAME,
-      IFF(ARRIVED_TODAY, SOURCE_RECORDS, 0) AS SOURCE_RECORDS,
-      IFF(ARRIVED_TODAY, TARGET_RECORDS, 0) AS TARGET_RECORDS,
-
-      /* Status & error message */
-      IFF(ARRIVED_TODAY, 'Success',
-          IFF(TODAY_DAY >= SCHED_DAY_CAPPED, 'Failed', NULL)
-      ) AS LOAD_STATUS,
-
-      IFF(ARRIVED_TODAY, '',
-          IFF(TODAY_DAY >= SCHED_DAY_CAPPED, 'Source file is missing.', NULL)
-      ) AS ERROR_MESSAGE,
-
-      /* For reference */
-      IFF(ARRIVED_TODAY OR TODAY_DAY = SCHED_DAY_CAPPED, DAY_PARAM, NULL) AS DAY_OF_EMAIL,
-
-      ETL_INSERT_TIMESTAMP,
-
-      /* Only expose endtime when Success today */
-      IFF(ARRIVED_TODAY, FILE_ENDTIME_EST, NULL) AS FILE_ENDTIME_EST
-  FROM FLAGS
-  WHERE ARRIVED_TODAY
-        OR TODAY_DAY >= SCHED_DAY_CAPPED   -- show “missing” only from scheduled day onward
-),
-
-/* -----------------------------------------------------------------------
-   4) Early-arrival repeat row
-   - If the file arrived BEFORE the scheduled day, also emit a row dated ON
-     the scheduled day so the dashboard shows it again on that date.
-   ----------------------------------------------------------------------- */
-EARLY_REPEAT AS (
-  SELECT
-      SCHED_DATE                         AS LOAD_DATE,   -- future (this month's scheduled day)
-      SOURCE_FREQ,
-      LOAD_DATA_CATEGORY,
-      ACCOUNTING_DATE,
-      SOURCE_FILE_NAME,
-      TARGET_NAME,
-      SOURCE_RECORDS,
-      TARGET_RECORDS,
-      'Success'                          AS LOAD_STATUS,
-      ''                                 AS ERROR_MESSAGE,
-      DAY_PARAM                          AS DAY_OF_EMAIL,
-      ETL_INSERT_TIMESTAMP,
-      FILE_ENDTIME_EST
-  FROM FLAGS
-  WHERE ARRIVED_TODAY
-    AND TODAY_DAY < SCHED_DAY_CAPPED     -- arrived early -> repeat on scheduled day
-),
-
--- 5) Final
-FINAL AS (
-  SELECT * FROM TODAY_ROWS
-  UNION ALL
-  SELECT * FROM EARLY_REPEAT
 )
 
-SELECT *
-FROM FINAL
-WHERE LOAD_DATE IS NOT NULL
-ORDER BY LOAD_DATE, SOURCE_FILE_NAME;
+SELECT
+    CURRENT_DATE() AS LOAD_DATE,        -- always show today's row
+
+    SOURCE_FREQ,
+    LOAD_DATA_CATEGORY,
+
+    /* Only show actual values when Success */
+    IFF(ARRIVED_TODAY, ACCOUNTING_DATE, NULL) AS ACCOUNTING_DATE,
+    IFF(ARRIVED_TODAY, SOURCE_FILE_NAME, '**') AS SOURCE_FILE_NAME,
+    IFF(ARRIVED_TODAY, TARGET_NAME, '**') AS TARGET_NAME,
+    IFF(ARRIVED_TODAY, SOURCE_RECORDS, 0) AS SOURCE_RECORDS,
+    IFF(ARRIVED_TODAY, TARGET_RECORDS, 0) AS TARGET_RECORDS,
+
+    /* Status logic */
+    IFF(ARRIVED_TODAY, 'Success', 'Failed') AS LOAD_STATUS,
+
+    /* Error message only for Failed */
+    IFF(ARRIVED_TODAY, '', 'Source file is missing.') AS ERROR_MESSAGE,
+
+    /* Show business day always */
+    SCHED_DAY AS DAY_OF_EMAIL,
+
+    ETL_INSERT_TIMESTAMP,
+
+    /* Only show when Success */
+    IFF(ARRIVED_TODAY, FILE_ENDTIME_EST, NULL) AS FILE_ENDTIME_EST
+
+FROM FLAGS
+
+WHERE
+    /* ✅ Success logic */
+    ARRIVED_TODAY
+
+    OR
+    /* ✅ Missing logic only when FILE EXPECTED TODAY */
+    (DAY_PARAM = SCHED_DAY AND NOT ARRIVED_TODAY)
+
+ORDER BY SOURCE_FILE_NAME;
