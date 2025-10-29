@@ -1,0 +1,74 @@
+-- Inputs in RAW come from RESULT_SCAN; assumes columns:
+-- LOAD_DATE, FILE_ENDTIME_EST, SOURCE_FREQ, DAY_OF_EMAIL, ... (your other cols)
+
+WITH RAW AS (
+  SELECT *
+  FROM TABLE(RESULT_SCAN('01c009be-0003-c2f4-0005-64d202f2f296'))
+  WHERE LOAD_DATE IS NOT NULL
+    AND UPPER(SOURCE_FREQ) = 'MONTHLY'
+),
+FLAGS AS (
+  SELECT
+      r.*,
+      DAY(CURRENT_DATE())                 AS today_day,
+      DAY_OF_EMAIL::NUMBER               AS sched_day,
+      -- Did a file arrive in the last 24h?
+      (FILE_ENDTIME_EST >= DATEADD(HOUR, -24, CURRENT_TIMESTAMP())) AS arrived_today,
+      -- Date of this month's scheduled day
+      DATE_FROM_PARTS(YEAR(CURRENT_DATE()), MONTH(CURRENT_DATE()), DAY_OF_EMAIL::NUMBER) AS sched_date
+  FROM RAW r
+),
+-- 1) Row for TODAY
+TODAY_ROWS AS (
+  SELECT
+      IFF(arrived_today, CURRENT_DATE(), NULL) AS load_date,   -- if arrived today show data today
+      SOURCE_FREQ,
+      LOAD_DATA_CATEGORY,
+      IFF(arrived_today, ACCOUNTING_DATE, NULL) AS ACCOUNTING_DATE,
+      IFF(arrived_today, SOURCE_FILE_NAME, '**') AS SOURCE_FILE_NAME,
+      IFF(arrived_today, TARGET_NAME,      '**') AS TARGET_NAME,
+      IFF(arrived_today, SOURCE_RECORDS, 0) AS SOURCE_RECORDS,
+      IFF(arrived_today, TARGET_RECORDS, 0) AS TARGET_RECORDS,
+      IFF(arrived_today, 'Success',
+          -- if scheduled day is today or already passed and nothing today → show Missing
+          IFF(today_day >= sched_day, 'Failed', NULL)
+      ) AS LOAD_STATUS,
+      IFF(arrived_today, '', IFF(today_day >= sched_day, 'Source file is missing.', NULL)) AS ERROR_MESSAGE,
+      IFF(arrived_today OR today_day = sched_day, DAY_OF_EMAIL::NUMBER, NULL) AS DAY_OF_EMAIL,
+      ETL_INSERT_TIMESTAMP,
+      IFF(arrived_today, FILE_ENDTIME_EST, NULL) AS FILE_ENDTIME_EST
+  FROM FLAGS
+  WHERE arrived_today
+        OR today_day >= sched_day          -- show “missing” today if expected day is today or passed
+),
+-- 2) Early-arrival extra row: show again ON THE SCHEDULED DAY
+EARLY_REPEAT AS (
+  SELECT
+      sched_date                         AS load_date,         -- row dated on the scheduled day
+      SOURCE_FREQ,
+      LOAD_DATA_CATEGORY,
+      ACCOUNTING_DATE,
+      SOURCE_FILE_NAME,
+      TARGET_NAME,
+      SOURCE_RECORDS,
+      TARGET_RECORDS,
+      'Success'                          AS LOAD_STATUS,
+      ''                                 AS ERROR_MESSAGE,
+      DAY_OF_EMAIL::NUMBER               AS DAY_OF_EMAIL,
+      ETL_INSERT_TIMESTAMP,
+      FILE_ENDTIME_EST
+  FROM FLAGS
+  WHERE arrived_today
+    AND today_day < sched_day            -- came early → repeat on sched day
+),
+-- 3) (Implicit) Late arrival: while today is between sched_day and arrival day,
+-- TODAY_ROWS above emits a "Failed / missing" today until it arrives.
+-- On the day it finally arrives, TODAY_ROWS flips to Success and we stop showing Missing.
+FINAL AS (
+  SELECT * FROM TODAY_ROWS
+  UNION ALL
+  SELECT * FROM EARLY_REPEAT
+)
+SELECT *
+FROM FINAL
+WHERE load_date IS NOT NULL;
