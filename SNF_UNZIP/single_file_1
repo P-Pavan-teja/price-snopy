@@ -1,4 +1,4 @@
-CREATE OR REPLACE FUNCTION COMMON_DB.UTIL_SCH.UNZIP_FILE(stage_name STRING, rel_path STRING)
+CREATE OR REPLACE FUNCTION COMMON_DB.UTIL_SCH.UNZIP_FILE(stage_path STRING)
 RETURNS TABLE (csv_row STRING)
 LANGUAGE PYTHON
 RUNTIME_VERSION = '3.10'
@@ -6,38 +6,45 @@ PACKAGES = ('snowflake-snowpark-python')
 HANDLER = 'UnzipFile'
 AS
 $$
-import zipfile, io
-from snowflake.snowpark.files import SnowflakeFile
+import zipfile
+import io
+import sys
 
 class UnzipFile:
-    def process(self, stage_name: str, rel_path: str):
-        full_path = f"@{stage_name.strip('@')}/{rel_path.lstrip('/')}"
-        with SnowflakeFile.open(full_path, 'rb') as f:
-            zip_bytes = f.read()
-
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-            for info in zf.infolist():
-                if info.is_dir():
-                    continue
-                with zf.open(info.filename) as fh:
-                    raw = fh.read()
-                    for enc in ('utf-8','latin-1','cp1252','iso-8859-1'):
-                        try:
-                            content = raw.decode(enc)
-                            break
-                        except UnicodeDecodeError:
-                            continue
-                    for line in content.splitlines():
-                        line = line.strip()
-                        if line and not line.startswith('Mac OS') and 'ATTR' not in line:
-                            yield (line,)
+    def process(self, stage_path):
+        # Import inside the function
+        from snowflake.snowpark.files import SnowflakeFile
+        
+        try:
+            # Open the file from the stage directly
+            with SnowflakeFile.open(stage_path, 'rb') as f:
+                zip_data = f.read()
+            
+            with zipfile.ZipFile(io.BytesIO(zip_data)) as zip_ref:
+                for file_info in zip_ref.filelist:
+                    if not file_info.is_dir() and file_info.filename.endswith('.csv'):
+                        with zip_ref.open(file_info.filename) as file:
+                            raw_content = file.read()
+                            # Try multiple encodings
+                            for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+                                try:
+                                    content = raw_content.decode(encoding)
+                                    break
+                                except UnicodeDecodeError:
+                                    continue
+                            
+                            # Split by newlines and yield each row
+                            lines = content.split('\n')
+                            for line in lines:
+                                line = line.strip()
+                                if line:
+                                    yield (line,)
+        except Exception as e:
+            yield (f"Error: {str(e)}",)
 $$;
 
--- call it like:
+-- Call it with the stage path directly (without BUILD_SCOPED_FILE_URL)
 SELECT csv_row
 FROM TABLE(
-  COMMON_DB.UTIL_SCH.UNZIP_FILE(
-    'COMMON_DB.UTIL_SCH.MY_S3_EXTERNAL_STAGE',
-    'zipfiles/srcfiles/Department1.zip'
-  )
+    COMMON_DB.UTIL_SCH.UNZIP_FILE('@COMMON_DB.UTIL_SCH.MY_S3_EXTERNAL_STAGE/zipfiles/srcfiles/Department1.zip')
 );
