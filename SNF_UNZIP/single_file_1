@@ -8,42 +8,41 @@ AS
 $$
 import zipfile
 import io
-import sys
+from _snowflake import open_stream
 
 class UnzipFile:
     def process(self, stage_path):
-        # Import inside the function
-        from snowflake.snowpark.files import SnowflakeFile
-        
         try:
-            # Open the file from the stage directly
-            with SnowflakeFile.open(stage_path, 'rb') as f:
+            # Use open_stream instead of SnowflakeFile.open
+            with open_stream(stage_path, 'rb') as f:
                 zip_data = f.read()
             
             with zipfile.ZipFile(io.BytesIO(zip_data)) as zip_ref:
                 for file_info in zip_ref.filelist:
-                    if not file_info.is_dir() and file_info.filename.endswith('.csv'):
+                    if not file_info.is_dir():
                         with zip_ref.open(file_info.filename) as file:
                             raw_content = file.read()
                             # Try multiple encodings
+                            content = None
                             for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
                                 try:
                                     content = raw_content.decode(encoding)
                                     break
-                                except UnicodeDecodeError:
+                                except (UnicodeDecodeError, AttributeError):
                                     continue
                             
-                            # Split by newlines and yield each row
-                            lines = content.split('\n')
-                            for line in lines:
-                                line = line.strip()
-                                if line:
-                                    yield (line,)
+                            if content:
+                                # Split by newlines and yield each row
+                                lines = content.split('\n')
+                                for line in lines:
+                                    line = line.strip()
+                                    if line and not line.startswith('__MACOSX'):
+                                        yield (line,)
         except Exception as e:
-            yield (f"Error: {str(e)}",)
+            yield (f"Error processing file: {str(e)}",)
 $$;
 
--- Call it with the stage path directly (without BUILD_SCOPED_FILE_URL)
+-- Call it with @ prefix for stage path
 SELECT csv_row
 FROM TABLE(
     COMMON_DB.UTIL_SCH.UNZIP_FILE('@COMMON_DB.UTIL_SCH.MY_S3_EXTERNAL_STAGE/zipfiles/srcfiles/Department1.zip')
