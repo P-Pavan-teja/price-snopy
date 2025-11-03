@@ -1,0 +1,83 @@
+-- Step 1: Create function to unzip and parse CSV rows
+CREATE OR REPLACE FUNCTION COMMON_DB.UTIL_SCH.UNZIP_FILE(stage_path STRING)
+RETURNS TABLE (csv_row STRING)
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.10'
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER = 'UnzipFile'
+AS
+$$
+import zipfile
+import io
+from snowflake.snowpark.files import SnowflakeFile
+
+class UnzipFile:
+    def process(self, stage_path):
+        with SnowflakeFile.open(stage_path, 'rb') as f:
+            zip_data = f.read()
+        
+        with zipfile.ZipFile(io.BytesIO(zip_data)) as zip_ref:
+            for file_info in zip_ref.filelist:
+                if not file_info.is_dir():
+                    with zip_ref.open(file_info.filename) as file:
+                        raw_content = file.read()
+                        # Try multiple encodings
+                        for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+                            try:
+                                content = raw_content.decode(encoding)
+                                break
+                            except UnicodeDecodeError:
+                                continue
+                        
+                        # Split by newlines and yield each row
+                        lines = content.split('\n')
+                        for line in lines:
+                            line = line.strip()
+                            # Skip empty lines and Mac metadata
+                            if line and not line.startswith('Mac OS') and 'ATTR' not in line:
+                                yield (line,)
+$$;
+
+-- Step 2: View the CSV content as rows
+SELECT csv_row
+FROM TABLE(
+    COMMON_DB.UTIL_SCH.UNZIP_FILE(
+        BUILD_SCOPED_FILE_URL(@COMMON_DB.UTIL_SCH.MY_S3_EXTERNAL_STAGE, 'zipfiles/srcfiles/Department1.zip')
+    )
+);
+
+-- Step 3: Create internal stage (if not exists)
+CREATE STAGE IF NOT EXISTS COMMON_DB.UTIL_SCH.UNZIPPED_FILES_STAGE;
+
+-- Step 4: Write directly to internal stage (no temp table!)
+COPY INTO @COMMON_DB.UTIL_SCH.UNZIPPED_FILES_STAGE/Department1.csv
+FROM (
+    SELECT csv_row
+    FROM TABLE(
+        COMMON_DB.UTIL_SCH.UNZIP_FILE(
+            BUILD_SCOPED_FILE_URL(@COMMON_DB.UTIL_SCH.MY_S3_EXTERNAL_STAGE, 'zipfiles/srcfiles/Department1.zip')
+        )
+    )
+)
+FILE_FORMAT = (
+    TYPE = 'CSV' 
+    COMPRESSION = 'NONE'
+    ESCAPE = 'NONE'
+    ESCAPE_UNENCLOSED_FIELD = 'NONE'
+)
+SINGLE = TRUE
+OVERWRITE = TRUE
+HEADER = FALSE;
+
+-- Step 5: Verify the file was written
+LIST @COMMON_DB.UTIL_SCH.UNZIPPED_FILES_STAGE;
+
+-- Step 6: View parsed CSV with columns
+SELECT 
+    SPLIT_PART(csv_row, ',', 1) AS Department_id,
+    SPLIT_PART(csv_row, ',', 2) AS Name
+FROM TABLE(
+    COMMON_DB.UTIL_SCH.UNZIP_FILE(
+        BUILD_SCOPED_FILE_URL(@COMMON_DB.UTIL_SCH.MY_S3_EXTERNAL_STAGE, 'zipfiles/srcfiles/Department1.zip')
+    )
+);
