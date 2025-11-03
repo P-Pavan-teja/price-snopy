@@ -1,0 +1,101 @@
+CREATE or REPLACE STAGE COMMON_DB.UTIL_SCH.UNZIPPED_FILES_STAGE;
+
+CREATE OR REPLACE PROCEDURE COMMON_DB.UTIL_SCH.UNZIP_AND_SAVE(
+    zip_file_path STRING,
+    output_filename STRING
+)
+RETURNS STRING
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.10'
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER = 'unzip_and_save'
+AS
+$$
+import zipfile
+import io
+import os
+from snowflake.snowpark.files import SnowflakeFile
+from snowflake.snowpark import Session
+
+def unzip_and_save(session: Session, zip_file_path: str, output_filename: str):
+    # ✅ Read ZIP from internal stage
+    with SnowflakeFile.open(zip_file_path, 'rb') as f:
+        zip_data = f.read()
+
+    files_processed = []
+
+    with zipfile.ZipFile(io.BytesIO(zip_data)) as zip_ref:
+        for file_info in zip_ref.filelist:
+
+            # ✅ Skip any folder entries
+            if file_info.is_dir():
+                continue
+
+            # ✅ Clean original file name
+            original_filename = (
+                file_info.filename.split('/')[-1]  # remove nested folder paths
+                .replace("._", "")                 # remove macOS hidden files
+                .replace(".DS_Store", "")          # eliminate metadata entry
+            ).strip()
+
+            # ✅ Skip if not CSV
+            if not original_filename.lower().endswith('.csv'):
+                continue
+
+            # ✅ Use provided name (only valid when processing 1 file)
+            save_filename = output_filename or original_filename
+
+            with zip_ref.open(file_info.filename) as file:
+                raw_content = file.read()
+
+                # ✅ Try common encodings
+                content = None
+                for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+                    try:
+                        content = raw_content.decode(encoding)
+                        break
+                    except:
+                        continue
+
+                if content is None:
+                    continue
+
+                # ✅ Clean lines (remove blank + metadata noise)
+                lines = [
+                    line.strip()
+                    for line in content.split('\n')
+                    if line.strip()
+                ]
+
+                if not lines:
+                    continue
+
+                # ✅ Write file to /tmp and upload to internal stage
+                payload = ("\n".join(lines) + "\n").encode("utf-8")
+                tmp_path = f"/tmp/{save_filename}"
+
+                with open(tmp_path, "wb") as tmp:
+                    tmp.write(payload)
+
+                container_name = save_filename.replace('.csv', '')  # remove extension
+                session.file.put(
+                    f"file://{tmp_path}",
+                    f"@COMMON_DB.UTIL_SCH.UNZIPPED_FILES_STAGE/",
+                    auto_compress=False,
+                    overwrite=True
+                )
+
+                files_processed.append(save_filename)
+
+    # ✅ Final return result
+    return (
+        f"Saved {len(files_processed)} file(s): {', '.join(files_processed)}"
+        if files_processed else
+        "No valid CSV files found"
+    )
+$$;
+
+CALL COMMON_DB.UTIL_SCH.UNZIP_AND_SAVE(
+    BUILD_SCOPED_FILE_URL(@COMMON_DB.UTIL_SCH.MY_S3_EXTERNAL_STAGE, 'zipfiles/srcfiles/sample.zip'),
+    NULL
+);
