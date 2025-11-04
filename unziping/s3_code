@@ -1,0 +1,72 @@
+import pandas as pd
+import boto3
+import zipfile
+import io
+import os
+from pprint import pprint
+
+s3 = boto3.client("s3")
+
+bucket = 'netflixsnowflakedbtproject'
+file_path = 'zipfiles/srcfiles/'
+output_path = 'zipfiles/srcfiles/'
+
+archive_path = 'zipfiles/archivefiles/'
+
+def unzip_file(source_bucket:str, zip_file: str, output_bucket :str,output_prefix :str,archive_bucket :str, archive_path: str):
+
+    print("#"*80)
+    print(f"\nUNZIPING FILE {zip_file}")
+    print("#"*80)
+
+    # getting zip file contents
+    s3_zip_file = s3.get_object(Bucket = source_bucket, Key = zip_file)['Body'].read()
+
+    with zipfile.ZipFile(io.BytesIO(s3_zip_file)) as z:
+        for name in z.namelist():
+            s3_output_path = ''
+            if name.startswith("__MACOSX/") or name.endswith("/"):
+                continue
+            file_name = os.path.basename(name)
+            dest_key = f"{output_prefix}{os.path.splitext(os.path.basename(folder_name))[0]}/{file_name}"
+
+            with z.open(name, "r") as f:
+                s3.upload_fileobj(f, output_bucket, dest_key)
+            print(f"Extracted file s3://{output_bucket}/{dest_key}")
+
+    # copying zip file back to archive folder
+    s3.copy_object(Bucket=archive_bucket, Key=archive_path + zip_file_name,
+                    CopySource={'Bucket': bucket, 'Key': zip_file})
+            
+    # Deleting the file from source folder
+    s3.delete_object(Bucket=source_bucket, Key=zip_file)
+
+    return print(f"Unziping completed {zip_file.split("/")[-1]} and moved to archive folder!!!\n")
+
+
+if __name__ == "__main__":
+
+    print("#"*80)
+    print(f"UNZIPING FILES")
+    print("#"*80)
+
+    all_zip_files = []
+    # Reading contents of s3 folder
+    s3_objects = s3.list_objects_v2(Bucket=bucket, Prefix=file_path, Delimiter="/")
+
+    for obj in s3_objects.get("Contents", []):
+        file_path = os.path.basename(obj['Key'])
+        if (file_path.split(".")[-1]).upper() == 'ZIP':
+            all_zip_files += [obj['Key']]
+
+    print(f"\nTotal zip file count: {len(all_zip_files)}")
+
+    print(f"zip file names are")
+    print('\n'.join(all_zip_files))
+    # Processing each zipfile to unzip
+    for zip_file in all_zip_files:
+        folder_name = os.path.basename(zip_file).split(".")[0]
+        zip_file_name = os.path.basename(zip_file)
+
+        unzip_file(bucket,zip_file, bucket, output_path,bucket , archive_path)
+
