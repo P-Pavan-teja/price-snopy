@@ -1,0 +1,137 @@
+CREATE OR REPLACE PROCEDURE COMMON_DB.UTIL_SCH.UNZIP_FILE(
+      ZIP_URL STRING,
+      EXTRACT_TO_STAGE STRING,
+      RETURN_FILE_LIST BOOLEAN DEFAULT TRUE,
+      DELETE_AFTER_EXTRACT BOOLEAN DEFAULT FALSE
+)
+RETURNS VARIANT
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.10'
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER = 'unzip_handler'
+EXECUTE AS CALLER
+AS
+$$
+import os
+import zipfile
+from datetime import datetime
+from snowflake.snowpark.files import SnowflakeFile
+from snowflake.snowpark import Session
+
+
+def unzip_handler(session: Session,
+                  zip_url: str,
+                  extract_to_stage: str,
+                  return_file_list: bool = True,
+                  delete_after_extract: bool = False):
+
+    result = {
+        "success": False,
+        "message": "",
+        "extracted_files": [],
+        "file_count": 0,
+        "total_size": 0,
+        "extraction_time": datetime.now().isoformat(),
+        "errors": []
+    }
+
+    try:
+        if not zip_url or not zip_url.startswith("https://"):
+            raise ValueError("ZIP_URL must be a scoped file URL")
+
+        if not extract_to_stage or not extract_to_stage.startswith("@"):
+            raise ValueError("EXTRACT_TO_STAGE must start with '@'")
+
+        extract_to_stage = extract_to_stage.rstrip("/")
+        extract_dir = "/tmp/unzipped"
+        os.makedirs(extract_dir, exist_ok=True)
+
+        # Read ZIP from scoped URL
+        with SnowflakeFile.open(zip_url, "rb") as f:
+            with zipfile.ZipFile(f, "r") as z:
+                members = z.infolist()
+                if not members:
+                    result["message"] = "ZIP file is empty"
+                    return result
+                z.extractall(extract_dir)
+
+        extracted_files = []
+        total_size = 0
+
+        # Flatten paths & upload to stage
+        for info in members:
+            if info.is_dir():
+                continue
+
+            original_name = info.filename
+            base_name = os.path.basename(original_name)
+            if not base_name:
+                continue
+
+            local_path = os.path.join(extract_dir, original_name)
+            if not os.path.isfile(local_path):
+                continue
+
+            size = os.path.getsize(local_path)
+            total_size += size
+
+            target_path = f"{extract_to_stage}/{base_name}"
+
+            put_results = session.file.put(
+                local_path,
+                target_path,
+                auto_compress=False,
+                overwrite=True
+            )
+
+            status = "UNKNOWN"
+            if put_results and len(put_results) > 0:
+                pr = put_results[0]
+                status = getattr(pr, "status", status)
+
+            extracted_files.append({
+                "original_name": original_name,
+                "name": base_name,
+                "stage_path": target_path,
+                "size": size,
+                "status": status
+            })
+
+        if not extracted_files:
+            result["message"] = "No regular files found inside the ZIP"
+            return result
+
+        if delete_after_extract:
+            result["errors"].append(
+                "delete_after_extract requested, but deletion of original ZIP "
+                "must be done using its @stage path outside this procedure."
+            )
+            msg = "Extracted files; original ZIP not deleted"
+        else:
+            msg = "Successfully extracted files"
+
+        result["success"] = True
+        result["message"] = msg
+        result["file_count"] = len(extracted_files)
+        result["total_size"] = total_size
+
+        if return_file_list:
+            result["extracted_files"] = extracted_files
+
+        return result
+
+    except Exception as e:
+        result["message"] = f"Unexpected error: {e}"
+        result["errors"].append(f"{type(e).__name__}: {e}")
+        return result
+$$;
+
+CALL COMMON_DB.UTIL_SCH.UNZIP_FILE(
+  BUILD_SCOPED_FILE_URL(
+    @COMMON_DB.UTIL_SCH.MY_S3_EXTERNAL_STAGE,
+    'zipfiles/srcfiles/SampleData.zip'
+  ),
+  '@COMMON_DB.UTIL_SCH.UNZIPPED_FILES_STAGE/UNZIPFILES/',
+  TRUE,
+  FALSE
+);
