@@ -18,4 +18,7 @@ SELECT s.*
 FROM stage_files s
 LEFT JOIN loaded_files l
        ON s.src_name_full = l.src_name
-WHERE l.src_name IS NULL;                              -- => NOT YET LOADED
+WHERE l.src_name IS NULL;                              -- => NOT YET LOADED;
+
+ALTER STAGE COMMON_DB.UTIL_SCH.UNZIPPED_FILES_STAGE 
+SET DIRECTORY = (ENABLE = TRUE);
