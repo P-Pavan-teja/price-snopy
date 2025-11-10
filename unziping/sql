@@ -1,0 +1,21 @@
+WITH stage_files AS (
+    SELECT
+        CONCAT('@COMMON_DB.UTIL_SCH.UNZIPPED_FILES_STAGE/', relative_path) AS src_name_full,
+        relative_path,
+        last_modified
+    FROM DIRECTORY(@COMMON_DB.UTIL_SCH.UNZIPPED_FILES_STAGE)
+    WHERE relative_path LIKE 'ZIPFILES/%.zip'          -- adjust to your zip path
+),
+
+loaded_files AS (
+    SELECT DISTINCT src_name
+    FROM COMMON_DB.UTIL_SCH.ERROR_LOG
+    WHERE task_flow_status = 1                         -- 1 = success
+      AND load_data_category = 'abc - external to internal'
+)
+
+SELECT s.*
+FROM stage_files s
+LEFT JOIN loaded_files l
+       ON s.src_name_full = l.src_name
+WHERE l.src_name IS NULL;                              -- => NOT YET LOADED
