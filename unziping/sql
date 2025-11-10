@@ -22,3 +22,21 @@ WHERE l.src_name IS NULL;                              -- => NOT YET LOADED;
 
 ALTER STAGE COMMON_DB.UTIL_SCH.UNZIPPED_FILES_STAGE 
 SET DIRECTORY = (ENABLE = TRUE);
+
+WITH stage_files AS (
+    SELECT name AS src_name_full
+    FROM STAGE_ZIPS
+),
+
+loaded_files AS (
+    SELECT DISTINCT src_name
+    FROM COMMON_DB.UTIL_SCH.ERROR_LOG
+    WHERE task_flow_status = 1
+      AND load_data_category = 'abc - external to internal'
+)
+
+SELECT s.src_name_full
+FROM stage_files s
+LEFT JOIN loaded_files l
+       ON s.src_name_full = l.src_name
+WHERE l.src_name IS NULL;
