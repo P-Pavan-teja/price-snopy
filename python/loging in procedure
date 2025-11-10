@@ -1,0 +1,136 @@
+CREATE OR REPLACE PROCEDURE COMMON_DB.UTIL_SCH.UNZIP_WITH_LOG(
+      P_JOB_ID           STRING,
+      P_TASKFLOW_NAME    STRING,
+      P_SRC_NAME         STRING,
+      P_TGT_NAME         STRING,
+      P_TOT_TGT_CNT      NUMBER,
+      P_ETL_USER         STRING
+)
+RETURNS STRING
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.10'
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER = 'main_handler'
+EXECUTE AS CALLER
+AS
+$$
+from datetime import datetime
+from snowflake.snowpark import Session
+
+# --------------------------------------------------------------------
+# Sub-function: handles inserting one record into the ERROR_LOG table
+# --------------------------------------------------------------------
+def log_error_handler(session: Session,
+                      job_id: str,
+                      taskflow_name: str,
+                      src_name: str,
+                      tgt_name: str,
+                      tot_tgt_cnt: int,
+                      status: int,
+                      error_msg: str,
+                      etl_user: str,
+                      start_time):
+
+    try:
+        end_time = session.sql("SELECT CURRENT_TIMESTAMP()").collect()[0][0]
+        final_msg = "SUCCESS" if status == 1 else (error_msg or "FAILURE")
+
+        insert_sql = f"""
+            INSERT INTO COMMON_DB.UTIL_SCH.ERROR_LOG (
+                JOB_ID,
+                LOAD_DATE,
+                LOAD_DATA_CATEGORY,
+                TASKFLOW_NAME,
+                ACCOUNT_DATE,
+                SRC_NAME,
+                TGT_NAME,
+                TOT_SRC_CNT,
+                TOT_TGT_CNT,
+                TOT_SRC_SKIP,
+                START_TIME,
+                END_TIME,
+                TASK_FLOW_STATUS,
+                ERROR_MSG,
+                ETL_USER,
+                SRC_FREQ
+            )
+            VALUES (
+                '{job_id}',
+                CURRENT_DATE(),
+                'abc - external to internal',
+                '{taskflow_name}',
+                NULL,
+                '{src_name}',
+                '{tgt_name}',
+                1,
+                {tot_tgt_cnt},
+                0,
+                TO_TIMESTAMP_NTZ('{start_time}'),
+                '{end_time}',
+                {status},
+                '{final_msg}',
+                '{etl_user}',
+                NULL
+            )
+        """
+        session.sql(insert_sql).collect()
+        return "LOG_INSERTED"
+    except Exception as e:
+        return f"LOG_ERROR: {type(e).__name__}: {e}"
+
+
+# --------------------------------------------------------------------
+# Main procedure: does its own work and calls log_error_handler
+# --------------------------------------------------------------------
+def main_handler(session: Session,
+                 P_JOB_ID: str,
+                 P_TASKFLOW_NAME: str,
+                 P_SRC_NAME: str,
+                 P_TGT_NAME: str,
+                 P_TOT_TGT_CNT: int,
+                 P_ETL_USER: str):
+
+    start_time = session.sql("SELECT CURRENT_TIMESTAMP()").collect()[0][0]
+
+    try:
+        # ----------------------------------------------------------------
+        # Your main business logic here (unzip / move / transform / etc.)
+        # ----------------------------------------------------------------
+        # For demo, we’ll just simulate success:
+        # ----------------------------------------------------------------
+        result_message = f"Processing completed for {P_SRC_NAME}"
+        status = 1       # 1 = Success
+        error_msg = None
+        tot_tgt_cnt = P_TOT_TGT_CNT
+
+    except Exception as e:
+        result_message = f"FAILED: {type(e).__name__}: {e}"
+        status = 3       # 3 = Failure
+        error_msg = str(e)
+        tot_tgt_cnt = 0
+
+    # ----------------------------------------------------------------
+    # Always call the sub-function to log the outcome
+    # ----------------------------------------------------------------
+    log_status = log_error_handler(session,
+                                   P_JOB_ID,
+                                   P_TASKFLOW_NAME,
+                                   P_SRC_NAME,
+                                   P_TGT_NAME,
+                                   tot_tgt_cnt,
+                                   status,
+                                   error_msg,
+                                   P_ETL_USER,
+                                   start_time)
+
+    return f"{result_message} | LOG_STATUS={log_status}"
+$$;
+
+CALL COMMON_DB.UTIL_SCH.UNZIP_WITH_LOG(
+    'JOB_002',
+    'UNZIP_FLOW',
+    '@COMMON_DB.UTIL_SCH.UNZIPPED_FILES_STAGE/ZIPFILES/SampleData.zip',
+    '@COMMON_DB.UTIL_SCH.UNZIPPED_FILES_STAGE/UNZIPFILES/',
+    5,
+    'PAVAN'
+);
