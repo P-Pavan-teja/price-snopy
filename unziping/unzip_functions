@@ -1,0 +1,71 @@
+import boto3
+import zipfile
+import io
+import os
+from pprint import pprint
+import json
+
+s3 = boto3.client('s3')
+
+def unzip_file(src_bucket_name,src_prefix,tgt_bucket_name,target_prefix):
+    obj = s3.get_object(Bucket = src_bucket_name,Key = src_prefix)["Body"].read()
+    print(f"\nUnzipping {src_prefix}")
+    file_names = []
+    with zipfile.ZipFile(io.BytesIO(obj)) as f:
+        for file in f.namelist():
+            file_name = os.path.basename(file)
+            # if not file.endswith('/'):
+            if not (file_name.startswith('.')):
+                extrect_data = f.read(file)
+                # txt = extrect_data.encode("utf-8")
+
+                target_full_prefix = f'{target_prefix}{os.path.basename(src_prefix).split('.')[0]}/{os.path.basename(file)}'
+                s3.put_object(Bucket = tgt_bucket_name, Key = target_full_prefix, Body = extrect_data)
+                print(f"Unzipped {target_full_prefix}")
+    return 'success'
+
+def unzip_large_files(src_bucket_name,src_prefix,tgt_bucket_name,target_prefix):
+    zip_file_name = os.path.basename(src_prefix)
+    local_zip_path = "/tmp/" + zip_file_name
+    s3.download_file(src_bucket_name, src_prefix, local_zip_path)
+    print(f"Downloaded {zip_file_name} to {local_zip_path}")
+    with zipfile.ZipFile(local_zip_path, "r") as f:
+        for file in f.namelist():
+            fi = os.path.basename(file)
+            if not (fi.startswith('.')):
+                with f.open(file) as src:
+                    folder_name = os.path.basename(src_prefix)
+                    target_full_prefix = f'{target_prefix}{folder_name.split('.')[0]}/{os.path.basename(file)}'
+                    s3.upload_fileobj(src, tgt_bucket_name, target_full_prefix)
+                    print(f"Unzipped {target_full_prefix}")
+            else:
+                continue
+    os.remove(local_zip_path)
+    return 'success'
+
+class logs:
+    def __init__(self, *targets): self.targets = targets
+    def write(self, data):
+        for t in self.targets:
+            t.write(data)
+            t.flush()
+    def flush(self):
+        for t in self.targets:
+            t.flush()
+
+def load_params(param_file_path):
+    """Reads .param file into a dictionary (key=value per line)."""
+    params = {}
+    # ---- check if file is in S3 ----
+    if param_file_path.startswith("s3://"):
+        # Example: s3://bucket/folder/file.param
+        parts = param_file_path.replace("s3://", "").split("/", 1)
+        bucket, key = parts[0], parts[1]
+        s3 = boto3.client("s3")
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        lines = obj["Body"].read().decode("utf-8")
+        print(f"Loaded parameter file from S3://{bucket}/{key}")
+    else:
+        with open(param_file_path, "r") as f:
+            lines = f.read()
+    return json.loads(lines)
