@@ -1,0 +1,77 @@
+import boto3
+import zipfile
+import io
+import os
+import sys
+from pprint import pprint
+from functions import *
+import datetime
+
+s3 = boto3.client('s3')
+
+# param_file = "s3://netflixsnowflakedbtproject/zipfiles/paramfiles/parameter.parm"
+
+
+def lambda_handler(event, context):
+
+    # ------------------------------------------------------------------
+    # Logging start
+    # ------------------------------------------------------------------
+    log_buffer = io.StringIO()
+    sys.stdout = logs(sys.stdout, log_buffer)
+    sys.stderr = sys.stdout
+
+    # ------------------------------------------------------------------
+    # Getting parameters from s3
+    # ------------------------------------------------------------------
+    param_file = event["param_file"]
+    parameters = load_params(param_file)
+
+    # projects
+
+    for proj , key in parameters.items():
+        # Each projects
+        print(f"Working on project {proj}")
+
+
+        loging_bucket = key['loging_bucket']
+        log_key = key['loging_file_path']
+        src_bucket_name = key['src_bucket_name']
+        src_prefix = key['src_prefix']
+        tgt_bucket_name = key['tgt_bucket_name']
+        target_prefix = key['target_prefix']
+
+        # ------------------------------------------------------------------
+        # Unziping
+        # ------------------------------------------------------------------
+        # listing all zip files
+        list_values = s3.list_objects_v2(Bucket=src_bucket_name, Prefix=src_prefix)["Contents"]
+
+        # pprint(list_values)
+
+        #checking whether do we have any file ir not
+        if len(list_values) > 1:
+            #runnig each zip file
+            for file in list_values:
+                # getting only zip files
+                if file['Key'].lower().endswith(".zip"):
+                    zip_file = file['Key']
+                    #checking whether the file is greater than 120 MB or not.
+                    if (file['Size']/1024/1000) > 120 :
+                        print(f"Working on file {zip_file} \nSize :- {(file['Size']/1024/1000)} MB")
+                        unzip_large_files(src_bucket_name, zip_file, tgt_bucket_name, target_prefix)
+                    else:
+                        print(f"Working on file {zip_file} \nSize :- {(file['Size']/1024/1000)} MB")
+                        unzip_file(src_bucket_name, zip_file, tgt_bucket_name, target_prefix)
+        else:
+            print("No files to process")
+            # Logging end
+        log_content = log_buffer.getvalue()
+
+        log_file = f"{log_key}log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+
+        s3.put_object(Bucket=loging_bucket, Key=log_file,Body=log_content.encode("utf-8"))
+        print(f"Log uploaded to :S3{log_file}")
+
+
+    return f"success"
