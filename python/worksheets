@@ -1,0 +1,13 @@
+from snowflake.snowpark.functions import col, when, lit
+
+final_df = (
+    session
+        .sql("LIST @MY_DB.MY_SCHEMA.MY_STAGE/prefix/")
+        .select(
+            when(col("name").ilike("%cash%"), col("name")).otherwise(lit(None)).alias("col_cash"),
+            when(col("name").ilike("%pos%"),  col("name")).otherwise(lit(None)).alias("col_pos"),
+            when(col("name").ilike("%tarn%"), col("name")).otherwise(lit(None)).alias("col_tarn")
+        )
+)
+
+final_df.show()
