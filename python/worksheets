@@ -11,3 +11,26 @@ final_df = (
 )
 
 final_df.show()
+
+rows = session.sql("LIST @MY_DB.MY_SCHEMA.MY_STAGE/prefix/").collect()
+
+cash_list = [r["NAME"] for r in rows if "cash" in r["NAME"].lower()]
+pos_list  = [r["NAME"] for r in rows if "pos"  in r["NAME"].lower()]
+tarn_list = [r["NAME"] for r in rows if "tarn" in r["NAME"].lower()]
+
+cash_list, pos_list, tarn_list = (
+    session.sql("LIST @MY_DB.MY_SCHEMA.MY_STAGE/prefix/")
+        .select("name")
+        .collect()
+)
+
+cash_list  = [r["NAME"] for r in session.sql("LIST @MY_DB.MY_SCHEMA.MY_STAGE/prefix/").collect() if "cash" in r["NAME"].lower()]
+pos_list   = [r["NAME"] for r in session.sql("LIST @MY_DB.MY_SCHEMA.MY_STAGE/prefix/").collect() if "pos"  in r["NAME"].lower()]
+tarn_list  = [r["NAME"] for r in session.sql("LIST @MY_DB.MY_SCHEMA.MY_STAGE/prefix/").collect() if "tarn" in r["NAME"].lower()]
+
+rows = session.sql("LIST @MY_DB.MY_SCHEMA.MY_STAGE/prefix/").collect()
+cash_list, pos_list, tarn_list = (
+    [r["NAME"] for r in rows if "cash" in r["NAME"].lower()],
+    [r["NAME"] for r in rows if "pos"  in r["NAME"].lower()],
+    [r["NAME"] for r in rows if "tarn" in r["NAME"].lower()],
+)
