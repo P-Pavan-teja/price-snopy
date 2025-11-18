@@ -1,0 +1,156 @@
+def gdr_log(session,job_id,load_data_category,source_name,target_name,accounting_date,
+            source_count,target_count,skipped,taskflow_status,error_msg,
+            start_time,end_time):
+
+    session.sql(f"""
+        INSERT INTO COMMON_DB.UTIL_SCH.GDR_AUDIT_LOG (
+JOB_ID, LOAD_DATE, LOAD_DATA_CATAGORY, ACCOUNTING_DATE, SOURCE_NAME, TARGET_NAME, 
+SOURCE_COUNT, TARGET_COUNT, SKIPED, TASKFLOW_STATUS, ERROR_MSG, START_TIME, END_TIME
+        )
+        VALUES (
+            '{job_id}' ,CURRENT_DATE, '{load_data_category}',
+            { 'NULL' if accounting_date is None else f"'{accounting_date}'" },
+            '{source_name}','{target_name}',{source_count},{target_count},
+            {skipped},'{taskflow_status}','{error_msg}','{start_time}',
+            '{end_time}'
+        )
+    """).collect()
+
+def unzip_handler(session: Session,
+                  zip_url: str,
+                  extract_to_stage: str,
+                  job_id: str):
+
+    v_start_time = datetime.now().isoformat()
+    
+    result = {
+        "success": False,
+        "message": "",
+        "extracted_files": [],
+        "file_count": 0,
+        "total_size": 0,
+        "extraction_time": datetime.now().isoformat(),
+        "errors": []
+    }
+
+    try:
+        # -------- validate inputs --------
+        # if not zip_url or not zip_url.startswith("https://"):
+        #     gdr_log(session, job_id=job_id, load_data_category='EVARE S3 - INTERNAL_STAGE',
+        #         source_name=zip_url,target_name=extract_to_stage, accounting_date=None, 
+        #         source_count=1,target_count=0,skipped=1,taskflow_status='3',
+        #         error_msg="First argument (ZIP_URL) must be a scoped file URL",
+        #         start_time=v_start_time, end_time=datetime.now().isoformat())
+        #     raise ValueError("First argument (ZIP_URL) must be a scoped file URL")
+
+        # if not extract_to_stage or not extract_to_stage.startswith("@"):
+        #     gdr_log(session, job_id=job_id, load_data_category='EVARE S3 - INTERNAL_STAGE',
+        #         source_name=zip_url,target_name=extract_to_stage, accounting_date=None, 
+        #         source_count=1,target_count=0,skipped=1,taskflow_status='3',
+        #         error_msg="EXTRACT_TO_STAGE must start with '@'",
+        #         start_time=v_start_time, end_time=datetime.now().isoformat())
+        #     raise ValueError("EXTRACT_TO_STAGE must start with '@'")
+            
+        extract_to_stage = extract_to_stage.rstrip("/")
+
+        # -------- local extract dir --------
+        extract_dir = "/tmp/unzipped"
+        os.makedirs(extract_dir, exist_ok=True)
+
+        zip_file_full_path = Path(zip_url)
+
+        zip_file_name = zip_file_full_path.name
+
+        # -------- open ZIP via scoped URL --------
+        with SnowflakeFile.open(zip_url, "rb") as f:
+            with zipfile.ZipFile(f, "r") as z:
+                members = z.infolist()
+                if not members:
+                    result["message"] = "ZIP file is empty"
+                    return result
+                z.extractall(extract_dir)
+
+        extracted_files = []
+        total_size = 0
+
+        # -------- process members (flatten paths) --------
+        for info in members:
+            if info.is_dir():
+                continue
+
+            original_name = info.filename
+            base_name = os.path.basename(original_name)
+            if not base_name:
+                continue  # skip weird entries
+
+            local_path = os.path.join(extract_dir, original_name)
+            if not os.path.isfile(local_path):
+                continue
+
+            size = os.path.getsize(local_path)
+            total_size += size
+
+            # upload to stage with flat name
+            target_path = f"{extract_to_stage}/{base_name}"
+
+            put_results = session.file.put(
+                local_path,
+                target_path,
+                auto_compress=False,
+                overwrite=True
+            )
+
+            if put_results and len(put_results) > 0:
+                pr = put_results[0]
+                # PutResult fields are attributes, not dict keys
+                status = getattr(pr, "status", "UNKNOWN")
+            else:
+                status = "UNKNOWN"
+
+            extracted_files.append({
+                "original_name": original_name,
+                "name": base_name,
+                "stage_path": target_path,
+                "size": size,
+                "status": status
+            })
+
+            gdr_log(session,
+                job_id=job_id, load_data_category='EVARE S3 - INTERNAL_STAGE',source_name=zip_file_name,
+                target_name=target_path, accounting_date=None, source_count=1, target_count=1,
+                skipped=0, taskflow_status='1', error_msg='success',
+                start_time=v_start_time, end_time=datetime.now().isoformat())
+
+        if not extracted_files:
+            result["message"] = "No regular files found inside the ZIP"
+            gdr_log(session, job_id=job_id, load_data_category='EVARE S3 - INTERNAL_STAGE',
+                source_name=zip_url,target_name=extract_to_stage, accounting_date=None, 
+                source_count=1,target_count=0,skipped=1,taskflow_status='2',
+                error_msg="No regular files found inside the ZIP",
+                start_time=v_start_time, end_time=datetime.now().isoformat())
+            return result
+
+        # -------- finalize --------
+        result["success"] = True
+        # result["message"] = msg
+        result["file_count"] = len(extracted_files)
+        result["total_size"] = total_size
+        result["extracted_files"] = extracted_files
+
+        gdr_log(session,
+            job_id=job_id, load_data_category='EVARE S3 - INTERNAL_STAGE(consolidate)',source_name=zip_file_name,
+            target_name=extract_to_stage, accounting_date=None, source_count=1, target_count=len(extracted_files),
+            skipped=0, taskflow_status='1', error_msg='success',
+            start_time=v_start_time, end_time=datetime.now().isoformat())
+        
+        # return result
+        return result["success"]
+
+    except Exception as e:
+        gdr_log(session, job_id=job_id, load_data_category='EVARE S3 - INTERNAL_STAGE',
+        source_name=zip_url,target_name=extract_to_stage, accounting_date=None, 
+        source_count=1,target_count=0,skipped=1,taskflow_status='1',error_msg={e},
+        start_time=v_start_time, end_time=datetime.now().isoformat())
+        result["message"] = f"Unexpected error: {e}"
+        result["errors"].append(f"{type(e).__name__}: {e}")
+        return result
