@@ -1,3 +1,25 @@
+CREATE OR REPLACE FUNCTION COMMON_DB.UTIL_SCH.GET_ENC_KEY(secret_alias STRING)
+RETURNS BINARY
+LANGUAGE PYTHON
+RUNTIME_VERSION = 3.10
+HANDLER = 'get_key'
+EXTERNAL_ACCESS_INTEGRATIONS = (ENC_KEY_INT)
+SECRETS = (
+    'key1' = COMMON_DB.UTIL_SCH.ENC_KEY_SECRET1,
+    'key2' = COMMON_DB.UTIL_SCH.ENC_KEY_SECRET2,
+    'key3' = COMMON_DB.UTIL_SCH.ENC_KEY_SECRET3
+)
+AS
+$$
+import _snowflake
+import hashlib
+
+def get_key(secret_alias):
+    # secret_alias = 'key1', 'key2', etc.
+    raw = _snowflake.get_generic_secret_string(secret_alias)
+    return hashlib.sha256(raw.encode('utf-8')).digest()
+$$;
+
 SELECT 
     c.C_CUSTKEY,
     c.C_NAME,
