@@ -58,3 +58,29 @@ SELECT
       'aes-cbc/pad:pkcs'                                     -- encryption method
   ) AS ciph
 FROM keys;
+
+
+CREATE OR REPLACE FUNCTION COMMON_DB.UTIL_SCH.ENCRYPT_VALUE_BY_COLUMN(
+    value_to_encrypt STRING,
+    column_name STRING
+)
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+$$
+    ENCRYPT_RAW(
+        TO_BINARY(value_to_encrypt, 'UTF-8'),
+        SHA2_BINARY('PAVAN TEJA', 256),
+        TO_BINARY(
+            (
+                SELECT COLUMN_IV_KEY
+                FROM COMMON_DB.UTIL_SCH.ENCRYPT_COLUMN_META_DATA
+                WHERE COLUMN_NAME = column_name
+                LIMIT 1                           
+            ),
+            'UTF-8'
+        ),
+        NULL,
+        'aes-cbc/pad:pkcs'
+    ):ciphertext::VARCHAR
+$$;
