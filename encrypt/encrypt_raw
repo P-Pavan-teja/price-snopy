@@ -1,0 +1,60 @@
+SELECT 
+    c.C_CUSTKEY,
+    c.C_NAME,
+    o.O_ORDERKEY,
+    o.O_ORDERDATE
+FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER c
+JOIN SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.ORDERS o
+    ON c.C_CUSTKEY = o.O_CUSTKEY
+WHERE c.C_CUSTKEY < 100
+ORDER BY c.C_CUSTKEY
+LIMIT 100;
+
+
+
+CREATE OR REPLACE TABLE COMMON_DB.UTIL_SCH.CUSTOMER_DEMO AS
+SELECT *
+FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER
+ORDER BY C_CUSTKEY
+LIMIT 100;
+
+
+CREATE OR REPLACE TABLE COMMON_DB.UTIL_SCH.ORDERS_DEMO AS
+SELECT *
+FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.ORDERS o
+WHERE o.O_CUSTKEY IN (
+    SELECT C_CUSTKEY
+    FROM COMMON_DB.UTIL_SCH.CUSTOMER_DEMO
+)
+ORDER BY O_ORDERKEY
+LIMIT 100;
+
+SELECT
+    c.C_CUSTKEY,
+    c.C_NAME,
+    o.O_ORDERKEY,
+    o.O_ORDERDATE,
+    o.O_TOTALPRICE
+FROM COMMON_DB.UTIL_SCH.CUSTOMER_DEMO c
+JOIN COMMON_DB.UTIL_SCH.ORDERS_DEMO o
+    ON c.C_CUSTKEY = o.O_CUSTKEY
+ORDER BY c.C_CUSTKEY, o.O_ORDERKEY
+LIMIT 50;
+
+-- 1) Prepare key and IV (both BINARY)
+WITH keys AS (
+  SELECT
+    SHA2_BINARY('MyKey123!', 256)                            AS key,  -- 32-byte AES-256 key (BINARY)
+    TO_BINARY('fixed_iv_16bytes', 'UTF-8')                   AS iv    -- 16 bytes (128 bits) IV
+)
+
+-- 2) Deterministic encryption with ENCRYPT_RAW
+SELECT
+  ENCRYPT_RAW(
+      TO_BINARY('ABC', 'UTF-8'),                             -- value_to_encrypt (BINARY)
+      key,                                                   -- BINARY key
+      iv,                                                    -- BINARY IV (fixed)
+      NULL,                                                  -- AAD = NULL (no AAD for CBC)
+      'aes-cbc/pad:pkcs'                                     -- encryption method
+  ) AS ciph
+FROM keys;
