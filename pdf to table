@@ -6,97 +6,53 @@ IMG_PATH = "out_extract/images/page_0057_img_01.png"
 REGION = "us-east-2"
 
 textract = boto3.client("textract", region_name=REGION)
-img_bytes = Path(IMG_PATH).read_bytes()
+resp = textract.detect_document_text(Document={"Bytes": Path(IMG_PATH).read_bytes()})
 
-resp = textract.detect_document_text(Document={"Bytes": img_bytes})
-
-# ---------------------------
-# Collect WORDs with geometry
-# ---------------------------
+# ---- 1) Get WORD blocks with geometry
 words = []
 for b in resp.get("Blocks", []):
     if b.get("BlockType") == "WORD":
         bb = b["Geometry"]["BoundingBox"]
-        top = float(bb["Top"])
-        h   = float(bb["Height"])
-        words.append({
-            "text": b["Text"],
-            "left": float(bb["Left"]),
-            "top": top,
-            "height": h,
-            "yc": top + (h / 2.0),   # vertical center (more stable than top)
-        })
+        top, h = float(bb["Top"]), float(bb["Height"])
+        words.append((b["Text"], float(bb["Left"]), top + h/2, h))  # text, left, yc, height
 
-df = pd.DataFrame(words).sort_values(["yc", "left"]).reset_index(drop=True)
+df = pd.DataFrame(words, columns=["text", "left", "yc", "h"]).sort_values(["yc", "left"]).reset_index(drop=True)
 
-# ---------------------------
-# Cluster words into rows (by yc)
-# ---------------------------
-def cluster_rows_by_yc(df: pd.DataFrame, tol: float):
-    rows = []
-    current = []
-    current_y = None
+# ---- 2) Cluster into rows (by yc) with adaptive tolerance
+tol = max(0.010, (df["h"].median() if len(df) else 0.012) * 0.70)
 
-    for r in df.itertuples(index=False):
-        if current_y is None:
-            current = [r]
-            current_y = r.yc
-            continue
+rows, cur, y = [], [], None
+for text, left, yc, _h in df.itertuples(index=False):
+    if y is None or abs(yc - y) <= tol:
+        cur.append((text, left, yc))
+        y = yc if y is None else (y * (len(cur)-1) + yc) / len(cur)
+    else:
+        rows.append(cur); cur = [(text, left, yc)]; y = yc
+if cur: rows.append(cur)
 
-        if abs(r.yc - current_y) <= tol:
-            current.append(r)
-            # stabilize with running mean
-            current_y = (current_y * (len(current)-1) + r.yc) / len(current)
-        else:
-            rows.append(current)
-            current = [r]
-            current_y = r.yc
+# ---- 3) Convert each row to (col_name, dtype, nullflag)
+def join(tokens): 
+    return " ".join(t for t in tokens if t).strip()
 
-    if current:
-        rows.append(current)
-    return rows
+out = []
+for r in rows:
+    r = sorted(r, key=lambda x: x[1])  # by left
+    col = join([t for t,l,_ in r if l < 0.45])
+    dt  = join([t for t,l,_ in r if 0.45 <= l < 0.75])
+    nu  = join([t for t,l,_ in r if l >= 0.75])
 
-# Adaptive tolerance: works across font sizes
-median_h = float(df["height"].median()) if not df.empty else 0.012
-tol = max(0.010, median_h * 0.70)   # <-- key line for your missing bottom row
-print("median_h:", median_h, "tol:", tol)
-
-row_groups = cluster_rows_by_yc(df, tol=tol)
-
-# ---------------------------
-# Split each row into 3 columns by horizontal zones
-# ---------------------------
-def clean_join(tokens):
-    return " ".join(t.strip() for t in tokens if t and str(t).strip())
-
-rows_out = []
-for grp in row_groups:
-    grp = sorted(grp, key=lambda x: x.left)
-
-    left_tokens  = [w.text for w in grp if w.left < 0.45]
-    mid_tokens   = [w.text for w in grp if 0.45 <= w.left < 0.75]
-    right_tokens = [w.text for w in grp if w.left >= 0.75]
-
-    col_name = clean_join(left_tokens)
-    dtype    = clean_join(mid_tokens)
-    nullflag = clean_join(right_tokens)
-
-    # Skip title/header junk: must contain datatype OR null text
-    if not dtype and not nullflag:
+    # keep schema-like rows
+    if not dt and "NULL" not in nu.upper():
+        continue
+    if not dt and not nu:
         continue
 
-    # Extra filter: datatype rows usually contain something like VARCHAR(, INT, DATE, etc.
-    # If your OCR sometimes splits NVARCHAR ( 4 ) into tokens, dtype may still exist.
-    if not dtype:
-        # Keep it only if it looks like a schema row (has NOT NULL or NULL)
-        if "NULL" not in nullflag.upper():
-            continue
+    out.append({"column_name": col, "data_type": dt, "is_null": nu})
 
-    rows_out.append({
-        "column_name": col_name,
-        "data_type": dtype,
-        "is_null": nullflag
-    })
-
-result = pd.DataFrame(rows_out)
+result = pd.DataFrame(out)
 display(result)
+
+
+csv_path = Path(IMG_PATH).with_suffix(".csv")
+result.to_csv(csv_path, index=False)
+print("Saved:", csv_path)
