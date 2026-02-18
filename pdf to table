@@ -17,63 +17,62 @@ words = []
 for b in resp.get("Blocks", []):
     if b.get("BlockType") == "WORD":
         bb = b["Geometry"]["BoundingBox"]
+        top = float(bb["Top"])
+        h   = float(bb["Height"])
         words.append({
             "text": b["Text"],
             "left": float(bb["Left"]),
-            "top": float(bb["Top"]),
-            "height": float(bb["Height"]),
+            "top": top,
+            "height": h,
+            "yc": top + (h / 2.0),   # vertical center (more stable than top)
         })
 
-df = pd.DataFrame(words)
-df = df.sort_values(["top", "left"]).reset_index(drop=True)
+df = pd.DataFrame(words).sort_values(["yc", "left"]).reset_index(drop=True)
 
 # ---------------------------
-# Cluster words into rows using a tolerance
+# Cluster words into rows (by yc)
 # ---------------------------
-def cluster_rows(df: pd.DataFrame, tol: float = 0.012):
-    """
-    tol is in normalized page units (Textract coords are 0..1).
-    0.010–0.018 is usually good depending on font size.
-    """
+def cluster_rows_by_yc(df: pd.DataFrame, tol: float):
     rows = []
     current = []
-    current_top = None
+    current_y = None
 
     for r in df.itertuples(index=False):
-        if current_top is None:
+        if current_y is None:
             current = [r]
-            current_top = r.top
+            current_y = r.yc
             continue
 
-        # if word is on same line (within tolerance), keep in same row
-        if abs(r.top - current_top) <= tol:
+        if abs(r.yc - current_y) <= tol:
             current.append(r)
-            # keep the running mean to stabilize against small OCR jitters
-            current_top = (current_top * (len(current)-1) + r.top) / len(current)
+            # stabilize with running mean
+            current_y = (current_y * (len(current)-1) + r.yc) / len(current)
         else:
             rows.append(current)
             current = [r]
-            current_top = r.top
+            current_y = r.yc
 
     if current:
         rows.append(current)
-
     return rows
 
-row_groups = cluster_rows(df, tol=0.012)
+# Adaptive tolerance: works across font sizes
+median_h = float(df["height"].median()) if not df.empty else 0.012
+tol = max(0.010, median_h * 0.70)   # <-- key line for your missing bottom row
+print("median_h:", median_h, "tol:", tol)
+
+row_groups = cluster_rows_by_yc(df, tol=tol)
 
 # ---------------------------
-# Extract 3 columns by horizontal zones
+# Split each row into 3 columns by horizontal zones
 # ---------------------------
 def clean_join(tokens):
     return " ".join(t.strip() for t in tokens if t and str(t).strip())
 
 rows_out = []
 for grp in row_groups:
-    # sort words left-to-right
     grp = sorted(grp, key=lambda x: x.left)
 
-    # Split into zones
     left_tokens  = [w.text for w in grp if w.left < 0.45]
     mid_tokens   = [w.text for w in grp if 0.45 <= w.left < 0.75]
     right_tokens = [w.text for w in grp if w.left >= 0.75]
@@ -82,10 +81,16 @@ for grp in row_groups:
     dtype    = clean_join(mid_tokens)
     nullflag = clean_join(right_tokens)
 
-    # Skip obvious title line: it usually has no datatype zone
-    # (Adjust this if your title line still sneaks in.)
-    if not dtype:
+    # Skip title/header junk: must contain datatype OR null text
+    if not dtype and not nullflag:
         continue
+
+    # Extra filter: datatype rows usually contain something like VARCHAR(, INT, DATE, etc.
+    # If your OCR sometimes splits NVARCHAR ( 4 ) into tokens, dtype may still exist.
+    if not dtype:
+        # Keep it only if it looks like a schema row (has NOT NULL or NULL)
+        if "NULL" not in nullflag.upper():
+            continue
 
     rows_out.append({
         "column_name": col_name,
