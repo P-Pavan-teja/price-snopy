@@ -1,119 +1,318 @@
-pip -q install pdfplumber pillow pandas
+# =========================
+# PDF → (1) schema IMAGES + (2) description TABLES + (3) BOLD table-name line
+# Pairs:  BOLD_NAME  ->  IMAGE  ->  DESC_TABLE
+# Handles: page-range + basic multi-page continuation for the DESC table
+#
+# REQUIREMENTS (run once in SageMaker):
+#   pip -q install pdfplumber pillow pandas
+# =========================
+
+from __future__ import annotations
+
+import re
+import json
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Tuple
 
 import pdfplumber
 import pandas as pd
-from pathlib import Path
 
-PDF_PATH = "/home/sagemaker-user/your.pdf"   # change this
+# ------------- CONFIG -------------
+PDF_PATH = "/home/sagemaker-user/your.pdf"   # <-- change
 START_PAGE = 50   # 1-based
-END_PAGE   = 60   # inclusive, 1-based
+END_PAGE   = 60   # 1-based inclusive
 
-out_dir = Path("out_extract")
-out_dir.mkdir(exist_ok=True)
+OUT_DIR = Path("out_extract")
+IMG_DIR = OUT_DIR / "images"
+CSV_DIR = OUT_DIR / "tables_csv"
+JSON_PATH = OUT_DIR / "paired_output.json"
 
-all_text = []
-all_tables = []
+RENDER_DPI = 300
 
-with pdfplumber.open(PDF_PATH) as pdf:
-    for p in range(START_PAGE-1, END_PAGE):   # pdfplumber is 0-based
-        page = pdf.pages[p]
+# "Bold" detection: works for most PDFs (font names like 'Arial-Bold', 'TimesNewRomanPS-BoldMT', etc.)
+BOLD_REGEX = re.compile(r"bold", re.IGNORECASE)
 
-        # 1) TEXT
-        text = page.extract_text() or ""
-        all_text.append({"page": p+1, "text": text})
+# Line grouping tolerance (PDF text y coords can be noisy)
+LINE_Y_TOL = 3.0
 
-        # 2) TABLES (works best when table is real text, not scanned)
-        tables = page.extract_tables()
-        for t_idx, t in enumerate(tables, start=1):
-            df = pd.DataFrame(t)
-            all_tables.append({"page": p+1, "table_index": t_idx, "df": df})
+# Table detection settings (tune if needed)
+TABLE_SETTINGS = {
+    "vertical_strategy": "lines",     # try "text" if no ruling lines
+    "horizontal_strategy": "lines",   # try "text" if no ruling lines
+    "intersection_tolerance": 5,
+    "snap_tolerance": 3,
+    "join_tolerance": 3,
+    "edge_min_length": 3,
+    "min_words_vertical": 2,
+    "min_words_horizontal": 1,
+}
 
-        # 3) IMAGE METADATA (locations of images on page)
-        # page.images gives bbox coordinates you can crop from the page render
-        images = page.images
-        print(f"page {p+1}: text_len={len(text)}, tables={len(tables)}, images={len(images)}")
-
-# Save text output
-pd.DataFrame(all_text).to_csv(out_dir / "pages_text.csv", index=False)
-
-# Save tables output (each table as CSV)
-for item in all_tables:
-    page_num = item["page"]
-    t_idx = item["table_index"]
-    item["df"].to_csv(out_dir / f"page_{page_num:04d}_table_{t_idx:02d}.csv", index=False)
-
-print("Done. Outputs in:", out_dir.resolve())
-
-import pdfplumber
-from pathlib import Path
-
-PDF_PATH = "/home/sagemaker-user/your.pdf"
-START_PAGE = 50
-END_PAGE = 60
-
-img_dir = Path("out_extract/images")
-img_dir.mkdir(parents=True, exist_ok=True)
-
-with pdfplumber.open(PDF_PATH) as pdf:
-    for p in range(START_PAGE-1, END_PAGE):
-        page = pdf.pages[p]
-        ph = page.height
-
-        for i, img in enumerate(page.images, start=1):
-            # Convert PDF coords to crop box
-            x0, y0, x1, y1 = img["x0"], img["y0"], img["x1"], img["y1"]
-            bbox = (x0, ph - y1, x1, ph - y0)
-
-            # Crop and render just that region
-            cropped = page.crop(bbox).to_image(resolution=300)
-            out_path = img_dir / f"page_{p+1:04d}_img_{i:02d}.png"
-            cropped.save(out_path, format="PNG")
-
-print("Saved cropped images to:", img_dir.resolve())
+# Continuation rule:
+# If next page has NO bold header near top, and has a table near top, we treat it as continuation.
+CONTINUATION_TOP_BAND = 140  # points from top
 
 
-import pdfplumber
-
-PDF_PATH = "/home/sagemaker-user/your.pdf"
-PAGE = 50  # 1-based
-
-with pdfplumber.open(PDF_PATH) as pdf:
-    page = pdf.pages[PAGE-1]
-
-    text = page.extract_text() or ""
-    tables = page.extract_tables()
-    images = page.images
-
-    print("TEXT chars:", len(text))
-    print("TABLES found:", len(tables))
-    print("IMAGES found:", len(images))
-
-    if images:
-        print("First image keys:", images[0].keys())
-        print("First image bbox:", images[0]["x0"], images[0]["y0"], images[0]["x1"], images[0]["y1"])
-
-from pathlib import Path
-
-PDF_PATH = "/home/sagemaker-user/your.pdf"
-PAGE = 50
-
-out_dir = Path("out_extract/images")
-out_dir.mkdir(parents=True, exist_ok=True)
-
-with pdfplumber.open(PDF_PATH) as pdf:
-    page = pdf.pages[PAGE-1]
-    ph = page.height
-
-    if not page.images:
-        print("No images detected on this page by pdfplumber.")
-    else:
-        for i, img in enumerate(page.images, start=1):
-            x0, y0, x1, y1 = img["x0"], img["y0"], img["x1"], img["y1"]
-            bbox = (x0, ph - y1, x1, ph - y0)
-            cropped = page.crop(bbox).to_image(resolution=300)
-            out_path = out_dir / f"page_{PAGE:04d}_img_{i:02d}.png"
-            cropped.save(out_path, format="PNG")
-            print("Saved:", out_path)
+# ------------- DATA MODELS -------------
+@dataclass
+class PairedItem:
+    table_name: str
+    page: int
+    image_index: int
+    image_file: str
+    image_bbox: Tuple[float, float, float, float]  # (x0, top, x1, bottom) in pdfplumber coords
+    desc_table_csv: Optional[str]
+    desc_table_bbox: Optional[Tuple[float, float, float, float]]
+    notes: str = ""
 
 
+# ------------- HELPERS -------------
+def ensure_dirs():
+    OUT_DIR.mkdir(exist_ok=True)
+    IMG_DIR.mkdir(parents=True, exist_ok=True)
+    CSV_DIR.mkdir(parents=True, exist_ok=True)
 
+def is_bold_font(fontname: str) -> bool:
+    return bool(fontname) and bool(BOLD_REGEX.search(fontname))
+
+def group_words_into_lines(words: List[Dict[str, Any]], y_tol: float = LINE_Y_TOL) -> List[Dict[str, Any]]:
+    """
+    Groups words into lines using their 'top' coordinate. Returns list of lines:
+    {"top":..., "bottom":..., "text":..., "is_bold":..., "words":[...]}
+    """
+    if not words:
+        return []
+
+    # Sort top-to-bottom, then left-to-right
+    words_sorted = sorted(words, key=lambda w: (w.get("top", 0), w.get("x0", 0)))
+
+    lines: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+    current_top = None
+
+    for w in words_sorted:
+        top = float(w.get("top", 0))
+        if current_top is None:
+            current = [w]
+            current_top = top
+            continue
+
+        if abs(top - current_top) <= y_tol:
+            current.append(w)
+        else:
+            lines.append(current)
+            current = [w]
+            current_top = top
+
+    if current:
+        lines.append(current)
+
+    out = []
+    for lw in lines:
+        text = " ".join([x.get("text", "").strip() for x in lw]).strip()
+        if not text:
+            continue
+        top = min(float(x.get("top", 0)) for x in lw)
+        bottom = max(float(x.get("bottom", 0)) for x in lw)
+        bold = any(is_bold_font(x.get("fontname", "")) for x in lw)
+        out.append({"top": top, "bottom": bottom, "text": text, "is_bold": bold, "words": lw})
+    return out
+
+def find_nearest_bold_line_above(lines: List[Dict[str, Any]], y_top: float) -> Optional[Dict[str, Any]]:
+    """
+    Finds the closest bold line whose bottom <= y_top (i.e., above a target).
+    """
+    candidates = [ln for ln in lines if ln["is_bold"] and ln["bottom"] <= y_top]
+    if not candidates:
+        return None
+    # nearest above -> maximize bottom (closest to target)
+    return max(candidates, key=lambda ln: ln["bottom"])
+
+def find_tables_with_bbox(page) -> List[Tuple[Tuple[float, float, float, float], List[List[str]]]]:
+    """
+    Uses pdfplumber's table-finder so we get bbox. Returns list of (bbox, table_matrix).
+    bbox is (x0, top, x1, bottom) in pdfplumber coords.
+    """
+    found = []
+    try:
+        table_finder = page.find_tables(table_settings=TABLE_SETTINGS)
+        for t in table_finder:
+            bbox = t.bbox  # (x0, top, x1, bottom)
+            data = t.extract()
+            # keep only meaningful tables
+            if data and any(any(cell not in (None, "", " ") for cell in row) for row in data):
+                found.append((bbox, data))
+    except Exception:
+        # Fallback: no bbox available
+        for data in (page.extract_tables() or []):
+            if data:
+                found.append(((None, None, None, None), data))
+    return found
+
+def pick_desc_table_below_image(tables: List[Tuple[Tuple[float, float, float, float], List[List[str]]]],
+                               image_bottom: float) -> Tuple[Optional[Tuple[float, float, float, float]], Optional[List[List[str]]]]:
+    """
+    Choose the nearest table whose top is below the image bottom.
+    """
+    candidates = []
+    for bbox, data in tables:
+        x0, top, x1, bottom = bbox
+        if top is None:
+            continue
+        if top >= image_bottom:
+            candidates.append((bbox, data))
+    if not candidates:
+        return None, None
+    # nearest below -> minimal top
+    bbox, data = min(candidates, key=lambda x: x[0][1])
+    return bbox, data
+
+def save_table_csv(df: pd.DataFrame, page_num: int, image_idx: int) -> str:
+    out_path = CSV_DIR / f"page_{page_num:04d}_img_{image_idx:02d}_desc.csv"
+    df.to_csv(out_path, index=False)
+    return str(out_path)
+
+def save_cropped_image(page, bbox: Tuple[float, float, float, float], page_num: int, img_idx: int) -> str:
+    """
+    bbox expected in pdfplumber coords: (x0, top, x1, bottom)
+    """
+    x0, top, x1, bottom = bbox
+    cropped = page.crop((x0, top, x1, bottom)).to_image(resolution=RENDER_DPI)
+    out_path = IMG_DIR / f"page_{page_num:04d}_img_{img_idx:02d}.png"
+    cropped.save(out_path, format="PNG")
+    return str(out_path)
+
+def has_bold_header_near_top(lines: List[Dict[str, Any]], top_band: float = CONTINUATION_TOP_BAND) -> bool:
+    return any(ln["is_bold"] and ln["top"] <= top_band for ln in lines)
+
+
+# ------------- MAIN -------------
+def run():
+    ensure_dirs()
+    results: List[PairedItem] = []
+
+    with pdfplumber.open(PDF_PATH) as pdf:
+        end = min(END_PAGE, len(pdf.pages))
+        start = max(1, START_PAGE)
+
+        carry_forward_last: Optional[PairedItem] = None
+
+        for p1 in range(start, end + 1):
+            page = pdf.pages[p1 - 1]
+
+            # Extract words with font info so we can detect bold text
+            words = page.extract_words(extra_attrs=["fontname", "size"])
+            lines = group_words_into_lines(words)
+
+            # Find images (bbox in pdfplumber coords: x0, top, x1, bottom)
+            imgs = page.images or []
+            # Normalize image bbox to (x0, top, x1, bottom)
+            img_bboxes = []
+            for im in imgs:
+                # pdfplumber provides x0,x1,top,bottom (and also y0,y1 sometimes)
+                x0 = float(im.get("x0"))
+                x1 = float(im.get("x1"))
+                top = float(im.get("top"))
+                bottom = float(im.get("bottom"))
+                img_bboxes.append((x0, top, x1, bottom))
+
+            # Find tables with bbox
+            tables = find_tables_with_bbox(page)
+
+            # --- Continuation handling (desc table continues on next page) ---
+            # If this page has no images BUT looks like continuation, append first table to previous desc table.
+            if carry_forward_last and not img_bboxes:
+                # If NO bold header near top and we have a table near top, treat as continuation
+                if (not has_bold_header_near_top(lines)) and tables:
+                    # pick the table with smallest top (nearest top)
+                    tables_with_top = [(bbox, data) for bbox, data in tables if bbox[1] is not None]
+                    if tables_with_top:
+                        bbox0, data0 = min(tables_with_top, key=lambda x: x[0][1])
+                        # Append rows to previous CSV (simple append; assumes same columns)
+                        try:
+                            prev_csv = carry_forward_last.desc_table_csv
+                            if prev_csv:
+                                prev_df = pd.read_csv(prev_csv)
+                                add_df = pd.DataFrame(data0)
+                                # Heuristic: if first row looks like header and matches previous header, drop it
+                                if len(add_df) > 0 and len(prev_df.columns) == add_df.shape[1]:
+                                    # If add_df first row equals prev_df columns, drop it
+                                    if list(add_df.iloc[0].astype(str)) == list(prev_df.columns.astype(str)):
+                                        add_df = add_df.iloc[1:].reset_index(drop=True)
+                                    add_df.columns = prev_df.columns
+                                merged = pd.concat([prev_df, add_df], ignore_index=True)
+                                merged.to_csv(prev_csv, index=False)
+                                carry_forward_last.notes += f" | appended continuation from page {p1}"
+                        except Exception as e:
+                            carry_forward_last.notes += f" | continuation append failed on page {p1}: {e}"
+                # Continue to next page
+                continue
+
+            # Reset carry-forward unless we set it again below
+            carry_forward_last = None
+
+            # --- For each image: save it + pair to bold name above + desc table below ---
+            for img_idx, img_bbox in enumerate(img_bboxes, start=1):
+                x0, top, x1, bottom = img_bbox
+
+                # Table name = nearest bold line above image
+                bold_line = find_nearest_bold_line_above(lines, y_top=top)
+                table_name = bold_line["text"] if bold_line else f"UNKNOWN_TABLE_PAGE_{p1}_IMG_{img_idx}"
+
+                # Save cropped image
+                image_file = save_cropped_image(page, img_bbox, page_num=p1, img_idx=img_idx)
+
+                # Pick desc table below image (on same page)
+                desc_bbox, desc_data = pick_desc_table_below_image(tables, image_bottom=bottom)
+
+                desc_csv = None
+                notes = ""
+                if desc_data is not None:
+                    df = pd.DataFrame(desc_data)
+
+                    # Heuristic: use first row as header if it looks header-ish
+                    if len(df) >= 2:
+                        header = list(df.iloc[0].fillna("").astype(str))
+                        # If header has fewer blanks than data row, treat it as header
+                        if sum(h.strip() == "" for h in header) <= max(1, len(header) // 3):
+                            df = df.iloc[1:].reset_index(drop=True)
+                            df.columns = [h.strip() if h.strip() else f"col_{i+1}" for i, h in enumerate(header)]
+                        else:
+                            df.columns = [f"col_{i+1}" for i in range(df.shape[1])]
+                    else:
+                        df.columns = [f"col_{i+1}" for i in range(df.shape[1])]
+
+                    desc_csv = save_table_csv(df, page_num=p1, image_idx=img_idx)
+                else:
+                    notes = "No desc table found below image on same page."
+
+                item = PairedItem(
+                    table_name=table_name,
+                    page=p1,
+                    image_index=img_idx,
+                    image_file=image_file,
+                    image_bbox=img_bbox,
+                    desc_table_csv=desc_csv,
+                    desc_table_bbox=desc_bbox if desc_bbox else None,
+                    notes=notes
+                )
+                results.append(item)
+
+                # Mark this item as eligible for continuation on next page
+                # (only if we did find a desc table; otherwise continuation doesn't help)
+                if desc_csv:
+                    carry_forward_last = item
+
+    # Save JSON summary
+    with open(JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump([asdict(r) for r in results], f, indent=2)
+
+    print("DONE")
+    print("Images:", IMG_DIR.resolve())
+    print("Desc tables CSV:", CSV_DIR.resolve())
+    print("Paired JSON:", JSON_PATH.resolve())
+    print(f"Total paired items: {len(results)}")
+
+
+if __name__ == "__main__":
+    run()
