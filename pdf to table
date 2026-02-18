@@ -2,57 +2,86 @@ import boto3
 import pandas as pd
 from pathlib import Path
 
-IMG_PATH = "out_extract/images/page_0057_img_01.png"
+# -------- CONFIG --------
+IMG_DIR = Path("out_extract/images")   # your image folder
 REGION = "us-east-2"
 
 textract = boto3.client("textract", region_name=REGION)
-resp = textract.detect_document_text(Document={"Bytes": Path(IMG_PATH).read_bytes()})
 
-# ---- 1) Get WORD blocks with geometry
-words = []
-for b in resp.get("Blocks", []):
-    if b.get("BlockType") == "WORD":
-        bb = b["Geometry"]["BoundingBox"]
-        top, h = float(bb["Top"]), float(bb["Height"])
-        words.append((b["Text"], float(bb["Left"]), top + h/2, h))  # text, left, yc, height
+# -------- FUNCTION --------
+def extract_schema_from_image(img_path):
 
-df = pd.DataFrame(words, columns=["text", "left", "yc", "h"]).sort_values(["yc", "left"]).reset_index(drop=True)
+    resp = textract.detect_document_text(
+        Document={"Bytes": img_path.read_bytes()}
+    )
 
-# ---- 2) Cluster into rows (by yc) with adaptive tolerance
-tol = max(0.010, (df["h"].median() if len(df) else 0.012) * 0.70)
+    # Collect words
+    words = []
+    for b in resp.get("Blocks", []):
+        if b.get("BlockType") == "WORD":
+            bb = b["Geometry"]["BoundingBox"]
+            top, h = float(bb["Top"]), float(bb["Height"])
+            words.append((b["Text"], float(bb["Left"]), top + h/2, h))
 
-rows, cur, y = [], [], None
-for text, left, yc, _h in df.itertuples(index=False):
-    if y is None or abs(yc - y) <= tol:
-        cur.append((text, left, yc))
-        y = yc if y is None else (y * (len(cur)-1) + yc) / len(cur)
-    else:
-        rows.append(cur); cur = [(text, left, yc)]; y = yc
-if cur: rows.append(cur)
+    if not words:
+        return pd.DataFrame()
 
-# ---- 3) Convert each row to (col_name, dtype, nullflag)
-def join(tokens): 
-    return " ".join(t for t in tokens if t).strip()
+    df = pd.DataFrame(words, columns=["text", "left", "yc", "h"]) \
+            .sort_values(["yc", "left"]) \
+            .reset_index(drop=True)
 
-out = []
-for r in rows:
-    r = sorted(r, key=lambda x: x[1])  # by left
-    col = join([t for t,l,_ in r if l < 0.45])
-    dt  = join([t for t,l,_ in r if 0.45 <= l < 0.75])
-    nu  = join([t for t,l,_ in r if l >= 0.75])
+    # Row clustering
+    tol = max(0.010, df["h"].median() * 0.70)
 
-    # keep schema-like rows
-    if not dt and "NULL" not in nu.upper():
+    rows, cur, y = [], [], None
+    for text, left, yc, _ in df.itertuples(index=False):
+        if y is None or abs(yc - y) <= tol:
+            cur.append((text, left, yc))
+            y = yc if y is None else (y * (len(cur)-1) + yc) / len(cur)
+        else:
+            rows.append(cur)
+            cur = [(text, left, yc)]
+            y = yc
+    if cur:
+        rows.append(cur)
+
+    # Extract columns
+    def join(x): return " ".join(x).strip()
+
+    out = []
+    for r in rows:
+        r = sorted(r, key=lambda x: x[1])
+
+        col = join([t for t,l,_ in r if l < 0.45])
+        dt  = join([t for t,l,_ in r if 0.45 <= l < 0.75])
+        nu  = join([t for t,l,_ in r if l >= 0.75])
+
+        # keep only real schema rows
+        if not dt and not nu:
+            continue
+
+        out.append({
+            "column_name": col,
+            "data_type": dt,
+            "is_null": nu
+        })
+
+    return pd.DataFrame(out)
+
+
+# -------- LOOP THROUGH DIRECTORY --------
+for img_path in IMG_DIR.glob("*.png"):
+
+    print(f"Processing: {img_path.name}")
+
+    result = extract_schema_from_image(img_path)
+
+    if result.empty:
+        print("   ⚠ No schema detected")
         continue
-    if not dt and not nu:
-        continue
 
-    out.append({"column_name": col, "data_type": dt, "is_null": nu})
+    # Save CSV with same name as image
+    csv_path = img_path.with_suffix(".csv")
+    result.to_csv(csv_path, index=False)
 
-result = pd.DataFrame(out)
-display(result)
-
-
-csv_path = Path(IMG_PATH).with_suffix(".csv")
-result.to_csv(csv_path, index=False)
-print("Saved:", csv_path)
+    print(f"   ✅ Saved: {csv_path.name}")
