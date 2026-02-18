@@ -1,0 +1,119 @@
+pip -q install pdfplumber pillow pandas
+
+import pdfplumber
+import pandas as pd
+from pathlib import Path
+
+PDF_PATH = "/home/sagemaker-user/your.pdf"   # change this
+START_PAGE = 50   # 1-based
+END_PAGE   = 60   # inclusive, 1-based
+
+out_dir = Path("out_extract")
+out_dir.mkdir(exist_ok=True)
+
+all_text = []
+all_tables = []
+
+with pdfplumber.open(PDF_PATH) as pdf:
+    for p in range(START_PAGE-1, END_PAGE):   # pdfplumber is 0-based
+        page = pdf.pages[p]
+
+        # 1) TEXT
+        text = page.extract_text() or ""
+        all_text.append({"page": p+1, "text": text})
+
+        # 2) TABLES (works best when table is real text, not scanned)
+        tables = page.extract_tables()
+        for t_idx, t in enumerate(tables, start=1):
+            df = pd.DataFrame(t)
+            all_tables.append({"page": p+1, "table_index": t_idx, "df": df})
+
+        # 3) IMAGE METADATA (locations of images on page)
+        # page.images gives bbox coordinates you can crop from the page render
+        images = page.images
+        print(f"page {p+1}: text_len={len(text)}, tables={len(tables)}, images={len(images)}")
+
+# Save text output
+pd.DataFrame(all_text).to_csv(out_dir / "pages_text.csv", index=False)
+
+# Save tables output (each table as CSV)
+for item in all_tables:
+    page_num = item["page"]
+    t_idx = item["table_index"]
+    item["df"].to_csv(out_dir / f"page_{page_num:04d}_table_{t_idx:02d}.csv", index=False)
+
+print("Done. Outputs in:", out_dir.resolve())
+
+import pdfplumber
+from pathlib import Path
+
+PDF_PATH = "/home/sagemaker-user/your.pdf"
+START_PAGE = 50
+END_PAGE = 60
+
+img_dir = Path("out_extract/images")
+img_dir.mkdir(parents=True, exist_ok=True)
+
+with pdfplumber.open(PDF_PATH) as pdf:
+    for p in range(START_PAGE-1, END_PAGE):
+        page = pdf.pages[p]
+        ph = page.height
+
+        for i, img in enumerate(page.images, start=1):
+            # Convert PDF coords to crop box
+            x0, y0, x1, y1 = img["x0"], img["y0"], img["x1"], img["y1"]
+            bbox = (x0, ph - y1, x1, ph - y0)
+
+            # Crop and render just that region
+            cropped = page.crop(bbox).to_image(resolution=300)
+            out_path = img_dir / f"page_{p+1:04d}_img_{i:02d}.png"
+            cropped.save(out_path, format="PNG")
+
+print("Saved cropped images to:", img_dir.resolve())
+
+
+import pdfplumber
+
+PDF_PATH = "/home/sagemaker-user/your.pdf"
+PAGE = 50  # 1-based
+
+with pdfplumber.open(PDF_PATH) as pdf:
+    page = pdf.pages[PAGE-1]
+
+    text = page.extract_text() or ""
+    tables = page.extract_tables()
+    images = page.images
+
+    print("TEXT chars:", len(text))
+    print("TABLES found:", len(tables))
+    print("IMAGES found:", len(images))
+
+    if images:
+        print("First image keys:", images[0].keys())
+        print("First image bbox:", images[0]["x0"], images[0]["y0"], images[0]["x1"], images[0]["y1"])
+
+from pathlib import Path
+
+PDF_PATH = "/home/sagemaker-user/your.pdf"
+PAGE = 50
+
+out_dir = Path("out_extract/images")
+out_dir.mkdir(parents=True, exist_ok=True)
+
+with pdfplumber.open(PDF_PATH) as pdf:
+    page = pdf.pages[PAGE-1]
+    ph = page.height
+
+    if not page.images:
+        print("No images detected on this page by pdfplumber.")
+    else:
+        for i, img in enumerate(page.images, start=1):
+            x0, y0, x1, y1 = img["x0"], img["y0"], img["x1"], img["y1"]
+            bbox = (x0, ph - y1, x1, ph - y0)
+            cropped = page.crop(bbox).to_image(resolution=300)
+            out_path = out_dir / f"page_{PAGE:04d}_img_{i:02d}.png"
+            cropped.save(out_path, format="PNG")
+            print("Saved:", out_path)
+
+
+
