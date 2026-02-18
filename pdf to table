@@ -1,121 +1,47 @@
-import re
 import boto3
 import pandas as pd
 from pathlib import Path
 
-# ---------------------------
-# CONFIG
-# ---------------------------
-IMG_PATH = "out_extract/images/page_0057_img_01.png"  # <-- change to your saved image path
-AWS_REGION = "us-east-2"  # <-- change if needed
+IMG_PATH = "out_extract/images/page_0057_img_01.png"
+textract = boto3.client("textract", region_name="us-east-2")
 
-# If your SageMaker role has Textract permissions, this works without keys.
-textract = boto3.client("textract", region_name=AWS_REGION)
-
-# ---------------------------
-# OCR (Textract)
-# ---------------------------
 img_bytes = Path(IMG_PATH).read_bytes()
 
 resp = textract.detect_document_text(
     Document={"Bytes": img_bytes}
 )
 
-# Collect OCR lines (Textract already gives LINE blocks)
-lines = [
-    b["Text"].strip()
-    for b in resp.get("Blocks", [])
-    if b.get("BlockType") == "LINE" and b.get("Text")
-]
+words = []
+for b in resp["Blocks"]:
+    if b["BlockType"] == "WORD":
+        words.append({
+            "text": b["Text"],
+            "left": b["Geometry"]["BoundingBox"]["Left"],
+            "top": b["Geometry"]["BoundingBox"]["Top"]
+        })
 
-print("OCR Lines:")
-for ln in lines:
-    print(" -", ln)
+df = pd.DataFrame(words)
 
 # ---------------------------
-# PARSING LOGIC
+# GROUP WORDS INTO ROWS (by vertical alignment)
 # ---------------------------
-# Examples you’ll see in your image:
-#   BillingClass (BillingClass) NVARCHAR(4) NOT NULL
-#   SponsorID (SponsorID) (FK) NVARCHAR(32) NOT NULL
-#   BillingClassDescription (BillingClassDescription) NVARCHAR(128) NOT NULL
-#
-# We parse:
-#   column_name  = first token before space (or before '(')
-#   data_type    = something like NVARCHAR(32), VARCHAR(100), INT, TIMESTAMP, etc.
-#   is_null      = NOT NULL / NULL (if missing, keep unknown)
-
-DT_PATTERN = re.compile(
-    r"\b("
-    r"(?:N?VARCHAR|CHAR|NVARCHAR)\s*\(\s*\d+\s*\)"
-    r"|(?:NUMBER|DECIMAL|NUMERIC)\s*\(\s*\d+\s*,\s*\d+\s*\)"
-    r"|(?:NUMBER|DECIMAL|NUMERIC)\s*\(\s*\d+\s*\)"
-    r"|INT|INTEGER|BIGINT|SMALLINT|TINYINT"
-    r"|FLOAT|DOUBLE|REAL"
-    r"|DATE|DATETIME|TIMESTAMP|TIME"
-    r"|BOOLEAN|BOOL"
-    r")\b",
-    re.IGNORECASE
-)
-
-NULL_PATTERN = re.compile(r"\bNOT\s+NULL\b|\bNULL\b", re.IGNORECASE)
-
-def normalize_dtype(s: str) -> str:
-    return re.sub(r"\s+", "", s.upper())  # NVARCHAR( 32 ) -> NVARCHAR(32)
-
-def parse_schema_line(line: str):
-    # find datatype
-    dt_m = DT_PATTERN.search(line)
-    if not dt_m:
-        return None
-
-    dtype = normalize_dtype(dt_m.group(1))
-
-    # nullability
-    nm = NULL_PATTERN.search(line)
-    if nm:
-        null_txt = nm.group(0).upper().replace("  ", " ")
-        if "NOT" in null_txt:
-            is_null = "NO"   # NOT NULL
-        else:
-            is_null = "YES"  # NULL
-    else:
-        is_null = "UNKNOWN"
-
-    # column name = take part before dtype, then first token before space or '('
-    left = line[:dt_m.start()].strip()
-
-    # remove leading icons/artifacts sometimes OCR includes weird characters
-    left = re.sub(r"^[^A-Za-z0-9_\.]+", "", left).strip()
-
-    # column name usually first token before space
-    # e.g. "SponsorID (SponsorID) (FK)" -> "SponsorID"
-    col = left.split()[0] if left else None
-    if col:
-        col = col.split("(")[0].strip()  # safety
-
-    if not col:
-        return None
-
-    return {"column_name": col, "data_type": dtype, "is_null": is_null, "raw_line": line}
+df["row"] = (df["top"] * 100).astype(int)  # cluster by Y position
 
 rows = []
-for ln in lines:
-    # Skip the top title line if it doesn't contain datatype (our parser naturally skips)
-    parsed = parse_schema_line(ln)
-    if parsed:
-        rows.append(parsed)
+for _, g in df.groupby("row"):
+    g = g.sort_values("left")
 
-df = pd.DataFrame(rows)
+    # Split by horizontal zones
+    col_name = " ".join(g[g["left"] < 0.45]["text"])
+    dtype    = " ".join(g[(g["left"] >= 0.45) & (g["left"] < 0.75)]["text"])
+    nullflag = " ".join(g[g["left"] >= 0.75]["text"])
 
-# Keep only the 3 columns you asked for
-out_df = df[["column_name", "data_type", "is_null"]].copy()
+    if dtype:   # skip title row
+        rows.append({
+            "column_name": col_name.strip(),
+            "data_type": dtype.strip(),
+            "is_null": nullflag.strip()
+        })
 
-print("\nParsed columns:")
-display(out_df)
-
-# Save output
-out_csv = Path("out_extract/schema_columns.csv")
-out_csv.parent.mkdir(exist_ok=True, parents=True)
-out_df.to_csv(out_csv, index=False)
-print("\nSaved:", out_csv.resolve())
+result = pd.DataFrame(rows)
+display(result)
