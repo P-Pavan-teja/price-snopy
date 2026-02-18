@@ -3,45 +3,95 @@ import pandas as pd
 from pathlib import Path
 
 IMG_PATH = "out_extract/images/page_0057_img_01.png"
-textract = boto3.client("textract", region_name="us-east-2")
+REGION = "us-east-2"
 
+textract = boto3.client("textract", region_name=REGION)
 img_bytes = Path(IMG_PATH).read_bytes()
 
-resp = textract.detect_document_text(
-    Document={"Bytes": img_bytes}
-)
+resp = textract.detect_document_text(Document={"Bytes": img_bytes})
 
+# ---------------------------
+# Collect WORDs with geometry
+# ---------------------------
 words = []
-for b in resp["Blocks"]:
-    if b["BlockType"] == "WORD":
+for b in resp.get("Blocks", []):
+    if b.get("BlockType") == "WORD":
+        bb = b["Geometry"]["BoundingBox"]
         words.append({
             "text": b["Text"],
-            "left": b["Geometry"]["BoundingBox"]["Left"],
-            "top": b["Geometry"]["BoundingBox"]["Top"]
+            "left": float(bb["Left"]),
+            "top": float(bb["Top"]),
+            "height": float(bb["Height"]),
         })
 
 df = pd.DataFrame(words)
+df = df.sort_values(["top", "left"]).reset_index(drop=True)
 
 # ---------------------------
-# GROUP WORDS INTO ROWS (by vertical alignment)
+# Cluster words into rows using a tolerance
 # ---------------------------
-df["row"] = (df["top"] * 100).astype(int)  # cluster by Y position
+def cluster_rows(df: pd.DataFrame, tol: float = 0.012):
+    """
+    tol is in normalized page units (Textract coords are 0..1).
+    0.010–0.018 is usually good depending on font size.
+    """
+    rows = []
+    current = []
+    current_top = None
 
-rows = []
-for _, g in df.groupby("row"):
-    g = g.sort_values("left")
+    for r in df.itertuples(index=False):
+        if current_top is None:
+            current = [r]
+            current_top = r.top
+            continue
 
-    # Split by horizontal zones
-    col_name = " ".join(g[g["left"] < 0.45]["text"])
-    dtype    = " ".join(g[(g["left"] >= 0.45) & (g["left"] < 0.75)]["text"])
-    nullflag = " ".join(g[g["left"] >= 0.75]["text"])
+        # if word is on same line (within tolerance), keep in same row
+        if abs(r.top - current_top) <= tol:
+            current.append(r)
+            # keep the running mean to stabilize against small OCR jitters
+            current_top = (current_top * (len(current)-1) + r.top) / len(current)
+        else:
+            rows.append(current)
+            current = [r]
+            current_top = r.top
 
-    if dtype:   # skip title row
-        rows.append({
-            "column_name": col_name.strip(),
-            "data_type": dtype.strip(),
-            "is_null": nullflag.strip()
-        })
+    if current:
+        rows.append(current)
 
-result = pd.DataFrame(rows)
+    return rows
+
+row_groups = cluster_rows(df, tol=0.012)
+
+# ---------------------------
+# Extract 3 columns by horizontal zones
+# ---------------------------
+def clean_join(tokens):
+    return " ".join(t.strip() for t in tokens if t and str(t).strip())
+
+rows_out = []
+for grp in row_groups:
+    # sort words left-to-right
+    grp = sorted(grp, key=lambda x: x.left)
+
+    # Split into zones
+    left_tokens  = [w.text for w in grp if w.left < 0.45]
+    mid_tokens   = [w.text for w in grp if 0.45 <= w.left < 0.75]
+    right_tokens = [w.text for w in grp if w.left >= 0.75]
+
+    col_name = clean_join(left_tokens)
+    dtype    = clean_join(mid_tokens)
+    nullflag = clean_join(right_tokens)
+
+    # Skip obvious title line: it usually has no datatype zone
+    # (Adjust this if your title line still sneaks in.)
+    if not dtype:
+        continue
+
+    rows_out.append({
+        "column_name": col_name,
+        "data_type": dtype,
+        "is_null": nullflag
+    })
+
+result = pd.DataFrame(rows_out)
 display(result)
