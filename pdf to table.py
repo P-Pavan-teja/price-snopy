@@ -6,20 +6,18 @@ import pandas as pd
 import pdfplumber
 
 PDF_PATH = "databases/Databases.pdf"
-START_TEXT = "Voyager.dbo"   # <- your marker text
-END_PAGE = 1180             # optional cap
+ANCHOR = "Abcdlnaljskn a"   # your exact text (case-sensitive by default)
 
-def find_start_page(pdf_path, marker_text, start_search_page=1):
-    marker_text = marker_text.lower().strip()
+def find_start_page(pdf_path, anchor, start_page=1):
     with pdfplumber.open(pdf_path) as pdf:
-        for i in range(start_search_page-1, len(pdf.pages)):
-            txt = (pdf.pages[i].extract_text() or "").lower()
-            if marker_text in txt:
-                return i + 1  # pdfplumber pages are 0-based; return 1-based
+        for i in range(start_page - 1, len(pdf.pages)):
+            txt = pdf.pages[i].extract_text() or ""
+            if anchor in txt:
+                return i + 1   # 1-based page number
     return None
 
-start_page = find_start_page(PDF_PATH, START_TEXT)
-print("Start page:", start_page)
+start_page = find_start_page(PDF_PATH, ANCHOR, start_page=1)
+print("Anchor found at page:", start_page)
 
 PDF_PATH   = "databases/Databases.pdf"
 START_PAGE = 957
