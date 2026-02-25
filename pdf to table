@@ -4,66 +4,81 @@ import pdfplumber
 import pandas as pd
 
 PDF_PATH = "input.pdf"
-START_PAGE = 1
-END_PAGE = 1200
-BATCH_SIZE = 50   # important for performance on 1200 pages
+START_PAGE = 957
+END_PAGE   = 1180
 
-# Adjust regex if needed (this covers db.sch.tbl with letters/numbers/_/$)
-DB_RE = re.compile(r"\b[A-Za-z_][\w$]*\.[A-Za-z_][\w$]*\.[A-Za-z_][\w$]*\b")
+# Matches Abc.bac.dbc inside:
+#   Abc.bac.dbc
+#   "Abc.bac.dbc table"
+#   Abc.bac.dbc table
+DB_RE = re.compile(r'(?i)\b([A-Za-z_][\w$]*\.[A-Za-z_][\w$]*\.[A-Za-z_][\w$]*)\b')
 
 def tabula_json_to_df(tjson):
-    rows = [[cell.get("text", "") for cell in row] for row in tjson["data"]]
+    # tabula JSON: tjson["data"] is list of rows; each row is list of cells with {"text": "..."}
+    rows = [[cell.get("text", "") for cell in row] for row in tjson.get("data", [])]
     df = pd.DataFrame(rows)
+
+    # clean empty rows
     df = df.replace(r"^\s*$", pd.NA, regex=True).dropna(how="all").reset_index(drop=True)
     return df
 
 def extract_lines_with_y(plumber_page, y_tol=3):
+    """
+    Build text 'lines' with an approximate top Y coordinate using pdfplumber words.
+    """
     words = plumber_page.extract_words()
     if not words:
         return []
+
     words = sorted(words, key=lambda w: (w["top"], w["x0"]))
 
     lines = []
-    current, current_y = [], None
+    current_words = []
+    current_y = None
 
     for w in words:
         y = w["top"]
         if current_y is None or abs(y - current_y) <= y_tol:
-            current.append(w)
+            current_words.append(w)
             current_y = y if current_y is None else (current_y + y) / 2
         else:
-            lines.append({"top": current_y, "text": " ".join(x["text"] for x in current)})
-            current, current_y = [w], y
+            lines.append({"top": current_y, "text": " ".join(x["text"] for x in current_words)})
+            current_words = [w]
+            current_y = y
 
-    if current:
-        lines.append({"top": current_y, "text": " ".join(x["text"] for x in current)})
+    if current_words:
+        lines.append({"top": current_y, "text": " ".join(x["text"] for x in current_words)})
 
     return lines
 
-def find_nearest_db_label_above(lines, table_top, max_scan=350):
-    # Find all db.sch.tbl matches above the table within max_scan distance
-    best = None  # (y, label)
+def find_table_name_above(lines, table_top, max_scan=450):
+    """
+    Find closest db.sch.tbl ABOVE the table. max_scan controls how far above to look.
+    Returns 'Abc.bac.dbc' from lines like '"Abc.bac.dbc table"'
+    """
+    best_y = None
+    best_label = None
+
     for ln in lines:
-        if ln["top"] < table_top and (table_top - ln["top"]) <= max_scan:
+        y = ln["top"]
+        if y < table_top and (table_top - y) <= max_scan:
             m = DB_RE.search(ln["text"])
             if m:
-                y = ln["top"]
-                if best is None or y > best[0]:  # closest above
-                    best = (y, m.group(0))
-    return best[1] if best else None
+                # pick the nearest above (largest y below table_top)
+                if best_y is None or y > best_y:
+                    best_y = y
+                    best_label = m.group(1)
+
+    return best_label or ""
 
 all_parts = []
 
 with pdfplumber.open(PDF_PATH) as pdf:
-    for batch_start in range(START_PAGE, END_PAGE + 1, BATCH_SIZE):
-        batch_end = min(batch_start + BATCH_SIZE - 1, END_PAGE)
-        page_range = f"{batch_start}-{batch_end}"
-        print("Processing pages:", page_range)
-
-        # 1) Get tables with geometry and page number
+    for page_num in range(START_PAGE, END_PAGE + 1):
+        # 1) Read all tables on this page as JSON (gives table bbox: top/left/width/height)
         tables_json = tabula.read_pdf(
             PDF_PATH,
-            pages=page_range,
+            pages=str(page_num),
             multiple_tables=True,
             guess=True,
             silent=True,
@@ -73,29 +88,29 @@ with pdfplumber.open(PDF_PATH) as pdf:
         if not tables_json:
             continue
 
-        # 2) Cache page text lines once per page (critical for performance)
-        page_lines_cache = {}
+        # 2) Extract page lines once (performance)
+        page = pdf.pages[page_num - 1]  # pdfplumber is 0-based
+        lines = extract_lines_with_y(page, y_tol=3)
 
+        # 3) For each table: get its top, find nearest label above, build DF, insert table_name
         for t in tables_json:
-            page_num = int(t["page"])  # 1-based
-            if page_num not in page_lines_cache:
-                page_lines_cache[page_num] = extract_lines_with_y(pdf.pages[page_num - 1], y_tol=3)
-
-            lines = page_lines_cache[page_num]
-            table_top = float(t["top"])
-
-            label = find_nearest_db_label_above(lines, table_top, max_scan=350) or ""
+            table_top = float(t.get("top", 0.0))
+            table_name = find_table_name_above(lines, table_top, max_scan=450)
 
             df = tabula_json_to_df(t)
+            if df.empty:
+                continue
 
-            # OPTIONAL: if your tables always have 3 cols, enforce it
-            # keep only first 3 columns if extra junk appears
+            # If your tables are ALWAYS 3 columns, enforce it (drops extra junk cols)
             if df.shape[1] > 3:
                 df = df.iloc[:, :3]
 
-            df.columns = ["column_name", "description", "comments"] if df.shape[1] == 3 else df.columns
+            # Rename if exactly 3 cols (your known schema)
+            if df.shape[1] == 3:
+                df.columns = ["column_name", "description", "comments"]
 
-            df.insert(0, "table_name", label)
+            # Add metadata
+            df.insert(0, "table_name", table_name)
             df.insert(1, "__page__", page_num)
 
             all_parts.append(df)
@@ -103,5 +118,5 @@ with pdfplumber.open(PDF_PATH) as pdf:
 combined = pd.concat(all_parts, ignore_index=True) if all_parts else pd.DataFrame()
 display(combined)
 
-# Save
-# combined.to_csv("all_tables_with_table_name.csv", index=False)
+# Save if you want
+# combined.to_csv("tables_957_1180_with_table_name.csv", index=False)
