@@ -3,6 +3,24 @@ import tabula
 import pdfplumber
 import pandas as pd
 
+import pdfplumber
+
+PDF_PATH = "databases/Databases.pdf"
+START_TEXT = "Voyager.dbo"   # <- your marker text
+END_PAGE = 1180             # optional cap
+
+def find_start_page(pdf_path, marker_text, start_search_page=1):
+    marker_text = marker_text.lower().strip()
+    with pdfplumber.open(pdf_path) as pdf:
+        for i in range(start_search_page-1, len(pdf.pages)):
+            txt = (pdf.pages[i].extract_text() or "").lower()
+            if marker_text in txt:
+                return i + 1  # pdfplumber pages are 0-based; return 1-based
+    return None
+
+start_page = find_start_page(PDF_PATH, START_TEXT)
+print("Start page:", start_page)
+
 PDF_PATH   = "databases/Databases.pdf"
 START_PAGE = 957
 END_PAGE   = 1180  # change as needed
