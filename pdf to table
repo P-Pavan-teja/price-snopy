@@ -1,87 +1,36 @@
-import boto3
+import tabula
 import pandas as pd
-from pathlib import Path
 
-# -------- CONFIG --------
-IMG_DIR = Path("out_extract/images")   # your image folder
-REGION = "us-east-2"
+pdf_path = "input.pdf"
+start_page = 5
+end_page = 12
+page_range = f"{start_page}-{end_page}"
 
-textract = boto3.client("textract", region_name=REGION)
+dfs = tabula.read_pdf(pdf_path, pages=page_range, multiple_tables=True, guess=True)
+if not dfs:
+    raise ValueError("No tables extracted")
 
-# -------- FUNCTION --------
-def extract_schema_from_image(img_path):
+# Combine first
+combined = pd.concat(dfs, ignore_index=True)
+combined = combined.dropna(how="all").reset_index(drop=True)
 
-    resp = textract.detect_document_text(
-        Document={"Bytes": img_path.read_bytes()}
-    )
+# If Tabula gives generic column names, the first row may actually be the header
+# We'll take the first row as "true header" only if columns look like Unnamed / 0,1,2...
+generic_cols = all(str(c).isdigit() or str(c).lower().startswith("unnamed") for c in combined.columns)
 
-    # Collect words
-    words = []
-    for b in resp.get("Blocks", []):
-        if b.get("BlockType") == "WORD":
-            bb = b["Geometry"]["BoundingBox"]
-            top, h = float(bb["Top"]), float(bb["Height"])
-            words.append((b["Text"], float(bb["Left"]), top + h/2, h))
+if generic_cols and len(combined) > 0:
+    new_header = combined.iloc[0].astype(str).tolist()
+    combined = combined.iloc[1:].copy()
+    combined.columns = new_header
+    combined = combined.reset_index(drop=True)
 
-    if not words:
-        return pd.DataFrame()
+# Now drop repeated header rows inside the data
+header_values = [str(c).strip().lower() for c in combined.columns]
 
-    df = pd.DataFrame(words, columns=["text", "left", "yc", "h"]) \
-            .sort_values(["yc", "left"]) \
-            .reset_index(drop=True)
+def is_repeated_header_row(row):
+    row_vals = [str(x).strip().lower() for x in row.tolist()]
+    return row_vals == header_values
 
-    # Row clustering
-    tol = max(0.010, df["h"].median() * 0.70)
+combined = combined[~combined.apply(is_repeated_header_row, axis=1)].reset_index(drop=True)
 
-    rows, cur, y = [], [], None
-    for text, left, yc, _ in df.itertuples(index=False):
-        if y is None or abs(yc - y) <= tol:
-            cur.append((text, left, yc))
-            y = yc if y is None else (y * (len(cur)-1) + yc) / len(cur)
-        else:
-            rows.append(cur)
-            cur = [(text, left, yc)]
-            y = yc
-    if cur:
-        rows.append(cur)
-
-    # Extract columns
-    def join(x): return " ".join(x).strip()
-
-    out = []
-    for r in rows:
-        r = sorted(r, key=lambda x: x[1])
-
-        col = join([t for t,l,_ in r if l < 0.45])
-        dt  = join([t for t,l,_ in r if 0.45 <= l < 0.75])
-        nu  = join([t for t,l,_ in r if l >= 0.75])
-
-        # keep only real schema rows
-        if not dt and not nu:
-            continue
-
-        out.append({
-            "column_name": col,
-            "data_type": dt,
-            "is_null": nu
-        })
-
-    return pd.DataFrame(out)
-
-
-# -------- LOOP THROUGH DIRECTORY --------
-for img_path in IMG_DIR.glob("*.png"):
-
-    print(f"Processing: {img_path.name}")
-
-    result = extract_schema_from_image(img_path)
-
-    if result.empty:
-        print("   ⚠ No schema detected")
-        continue
-
-    # Save CSV with same name as image
-    csv_path = img_path.with_suffix(".csv")
-    result.to_csv(csv_path, index=False)
-
-    print(f"   ✅ Saved: {csv_path.name}")
+display(combined)
