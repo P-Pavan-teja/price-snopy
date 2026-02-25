@@ -4,13 +4,11 @@ import pdfplumber
 import pandas as pd
 
 PDF_PATH   = "databases/Databases.pdf"
-START_PAGE = 1
-END_PAGE   = 300   # change as needed
+START_PAGE = 957
+END_PAGE   = 1180   # change as needed
 
-# ✅ handles: db.sch.tbl  and db.sch. tbl  and db . sch . tbl
-DB_RE = re.compile(
-    r'(?i)\b([A-Za-z_][\w$]*)\s*\.\s*([A-Za-z_][\w$]*)\s*\.\s*([A-Za-z_][\w$]*)\b'
-)
+# ✅ handles db.sch.tbl and db.sch. tbl and db . sch . tbl
+DB_RE = re.compile(r'(?i)\b([A-Za-z_][\w$]*)\s*\.\s*([A-Za-z_][\w$]*)\s*\.\s*([A-Za-z_][\w$]*)\b')
 
 # ------------------------------------------------------------
 # Helpers
@@ -28,6 +26,8 @@ def tabula_json_to_df(tjson):
     data = tjson.get("data") or []
     rows = [[cell.get("text", "") if isinstance(cell, dict) else "" for cell in row] for row in data]
     df = pd.DataFrame(rows)
+
+    # strip strings, drop fully empty rows
     df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
     df = df.replace(r"^\s*$", pd.NA, regex=True).dropna(how="all").reset_index(drop=True)
     return df
@@ -53,22 +53,26 @@ def remove_table_header_rows(df):
     )
     return df[~is_header].reset_index(drop=True)
 
-# ✅ merge wrapped multi-line rows into one logical row
+# ✅ FIXED: merge wrapped multi-line rows into one logical row
 def merge_multiline_rows(df):
     """
-    If column_name is empty on a row, treat it as continuation of the previous row.
-    Appends description/comments text to previous row with newline separator.
+    If column_name is empty/NA/<NA>/nan, treat row as continuation of previous row.
+    Appends description/comments to previous row.
     """
     if df.empty:
         return df
 
-    merged_rows = []
-    current = None
-
     def norm_cell(x):
-        if x is None or (isinstance(x, float) and pd.isna(x)):
+        # IMPORTANT: handle pandas <NA>, NaN, None, etc.
+        if x is None or pd.isna(x):
             return ""
-        return str(x).strip()
+        s = str(x).strip()
+        if s.lower() in ("<na>", "nan", "none", ""):
+            return ""
+        return s
+
+    merged = []
+    current = None
 
     for _, r in df.iterrows():
         c0 = norm_cell(r["column_name"])
@@ -77,23 +81,23 @@ def merge_multiline_rows(df):
 
         if c0:  # new logical row
             if current is not None:
-                merged_rows.append(current)
+                merged.append(current)
             current = {"column_name": c0, "description": c1, "comments": c2}
         else:
-            # continuation row: append to previous
+            # continuation row
             if current is None:
-                # weird case: starts with blank col_name; keep it as its own row
+                # weird case: first row has empty column_name; keep it
                 current = {"column_name": "", "description": c1, "comments": c2}
             else:
                 if c1:
-                    current["description"] = (current["description"] + "\n" + c1).strip() if current["description"] else c1
+                    current["description"] = (current["description"] + " " + c1).strip() if current["description"] else c1
                 if c2:
-                    current["comments"] = (current["comments"] + "\n" + c2).strip() if current["comments"] else c2
+                    current["comments"] = (current["comments"] + " " + c2).strip() if current["comments"] else c2
 
     if current is not None:
-        merged_rows.append(current)
+        merged.append(current)
 
-    return pd.DataFrame(merged_rows)
+    return pd.DataFrame(merged)
 
 def extract_lines_with_y(plumber_page, y_tol=3):
     words = plumber_page.extract_words()
@@ -162,7 +166,7 @@ with pdfplumber.open(PDF_PATH) as pdf:
         page_lines = extract_lines_with_y(pdf.pages[page_num - 1])
         page_labels = labels_on_page(page_lines)
 
-        # If page has label but no tables -> label applies going forward
+        # Case: page has label but no tables -> label applies going forward
         if (not tables_json) and page_labels:
             active_label = page_labels[-1][1]
             continue
@@ -170,7 +174,6 @@ with pdfplumber.open(PDF_PATH) as pdf:
         if not tables_json:
             continue
 
-        # process tables top->bottom
         tables_json = sorted(tables_json, key=lambda t: safe_float(t.get("top")) or 1e9)
 
         last_table_bottom = None
@@ -182,7 +185,7 @@ with pdfplumber.open(PDF_PATH) as pdf:
             if bottom is not None:
                 last_table_bottom = bottom if last_table_bottom is None else max(last_table_bottom, bottom)
 
-            # new table start if label is above THIS table
+            # New table start if label is above THIS table
             label_above = find_label_near_table(page_lines, top, max_scan=700)
             if label_above:
                 active_label = label_above
@@ -195,19 +198,18 @@ with pdfplumber.open(PDF_PATH) as pdf:
             if df is None:
                 continue
 
-            # ✅ clean at source level
+            # Source-level clean
             df = remove_table_header_rows(df)
             if df.empty:
                 continue
 
-            # ✅ fix wrapped multi-line rows
+            # ✅ multiline fix
             df = merge_multiline_rows(df)
             if df.empty:
                 continue
 
             df.insert(0, "table_name", active_label)
             df.insert(1, "__page__", page_num)
-
             all_parts.append(df)
 
         # label below last table applies to next page (Case2)
@@ -222,5 +224,4 @@ with pdfplumber.open(PDF_PATH) as pdf:
 combined = pd.concat(all_parts, ignore_index=True) if all_parts else pd.DataFrame()
 display(combined)
 
-# Save if needed
 # combined.to_csv("final_output.csv", index=False)
