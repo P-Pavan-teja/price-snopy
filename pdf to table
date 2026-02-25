@@ -1,36 +1,107 @@
+import re
 import tabula
+import pdfplumber
 import pandas as pd
 
-pdf_path = "input.pdf"
-start_page = 5
-end_page = 12
-page_range = f"{start_page}-{end_page}"
+PDF_PATH = "input.pdf"
+START_PAGE = 1
+END_PAGE = 1200
+BATCH_SIZE = 50   # important for performance on 1200 pages
 
-dfs = tabula.read_pdf(pdf_path, pages=page_range, multiple_tables=True, guess=True)
-if not dfs:
-    raise ValueError("No tables extracted")
+# Adjust regex if needed (this covers db.sch.tbl with letters/numbers/_/$)
+DB_RE = re.compile(r"\b[A-Za-z_][\w$]*\.[A-Za-z_][\w$]*\.[A-Za-z_][\w$]*\b")
 
-# Combine first
-combined = pd.concat(dfs, ignore_index=True)
-combined = combined.dropna(how="all").reset_index(drop=True)
+def tabula_json_to_df(tjson):
+    rows = [[cell.get("text", "") for cell in row] for row in tjson["data"]]
+    df = pd.DataFrame(rows)
+    df = df.replace(r"^\s*$", pd.NA, regex=True).dropna(how="all").reset_index(drop=True)
+    return df
 
-# If Tabula gives generic column names, the first row may actually be the header
-# We'll take the first row as "true header" only if columns look like Unnamed / 0,1,2...
-generic_cols = all(str(c).isdigit() or str(c).lower().startswith("unnamed") for c in combined.columns)
+def extract_lines_with_y(plumber_page, y_tol=3):
+    words = plumber_page.extract_words()
+    if not words:
+        return []
+    words = sorted(words, key=lambda w: (w["top"], w["x0"]))
 
-if generic_cols and len(combined) > 0:
-    new_header = combined.iloc[0].astype(str).tolist()
-    combined = combined.iloc[1:].copy()
-    combined.columns = new_header
-    combined = combined.reset_index(drop=True)
+    lines = []
+    current, current_y = [], None
 
-# Now drop repeated header rows inside the data
-header_values = [str(c).strip().lower() for c in combined.columns]
+    for w in words:
+        y = w["top"]
+        if current_y is None or abs(y - current_y) <= y_tol:
+            current.append(w)
+            current_y = y if current_y is None else (current_y + y) / 2
+        else:
+            lines.append({"top": current_y, "text": " ".join(x["text"] for x in current)})
+            current, current_y = [w], y
 
-def is_repeated_header_row(row):
-    row_vals = [str(x).strip().lower() for x in row.tolist()]
-    return row_vals == header_values
+    if current:
+        lines.append({"top": current_y, "text": " ".join(x["text"] for x in current)})
 
-combined = combined[~combined.apply(is_repeated_header_row, axis=1)].reset_index(drop=True)
+    return lines
 
+def find_nearest_db_label_above(lines, table_top, max_scan=350):
+    # Find all db.sch.tbl matches above the table within max_scan distance
+    best = None  # (y, label)
+    for ln in lines:
+        if ln["top"] < table_top and (table_top - ln["top"]) <= max_scan:
+            m = DB_RE.search(ln["text"])
+            if m:
+                y = ln["top"]
+                if best is None or y > best[0]:  # closest above
+                    best = (y, m.group(0))
+    return best[1] if best else None
+
+all_parts = []
+
+with pdfplumber.open(PDF_PATH) as pdf:
+    for batch_start in range(START_PAGE, END_PAGE + 1, BATCH_SIZE):
+        batch_end = min(batch_start + BATCH_SIZE - 1, END_PAGE)
+        page_range = f"{batch_start}-{batch_end}"
+        print("Processing pages:", page_range)
+
+        # 1) Get tables with geometry and page number
+        tables_json = tabula.read_pdf(
+            PDF_PATH,
+            pages=page_range,
+            multiple_tables=True,
+            guess=True,
+            silent=True,
+            output_format="json"
+        )
+
+        if not tables_json:
+            continue
+
+        # 2) Cache page text lines once per page (critical for performance)
+        page_lines_cache = {}
+
+        for t in tables_json:
+            page_num = int(t["page"])  # 1-based
+            if page_num not in page_lines_cache:
+                page_lines_cache[page_num] = extract_lines_with_y(pdf.pages[page_num - 1], y_tol=3)
+
+            lines = page_lines_cache[page_num]
+            table_top = float(t["top"])
+
+            label = find_nearest_db_label_above(lines, table_top, max_scan=350) or ""
+
+            df = tabula_json_to_df(t)
+
+            # OPTIONAL: if your tables always have 3 cols, enforce it
+            # keep only first 3 columns if extra junk appears
+            if df.shape[1] > 3:
+                df = df.iloc[:, :3]
+
+            df.columns = ["column_name", "description", "comments"] if df.shape[1] == 3 else df.columns
+
+            df.insert(0, "table_name", label)
+            df.insert(1, "__page__", page_num)
+
+            all_parts.append(df)
+
+combined = pd.concat(all_parts, ignore_index=True) if all_parts else pd.DataFrame()
 display(combined)
+
+# Save
+# combined.to_csv("all_tables_with_table_name.csv", index=False)
