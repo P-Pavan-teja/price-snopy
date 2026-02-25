@@ -7,13 +7,22 @@ PDF_PATH   = "databases/Databases.pdf"
 START_PAGE = 1
 END_PAGE   = 300   # change as needed
 
-DB_RE = re.compile(r'(?i)\b([A-Za-z_][\w$]*\.[A-Za-z_][\w$]*\.[A-Za-z_][\w$]*)\b')
+# ✅ handles: db.sch.tbl  and db.sch. tbl  and db . sch . tbl
+DB_RE = re.compile(
+    r'(?i)\b([A-Za-z_][\w$]*)\s*\.\s*([A-Za-z_][\w$]*)\s*\.\s*([A-Za-z_][\w$]*)\b'
+)
 
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
 def safe_float(x):
     try:
         return float(x)
     except:
         return None
+
+def normalize_db_label(match):
+    return f"{match.group(1)}.{match.group(2)}.{match.group(3)}"
 
 def tabula_json_to_df(tjson):
     data = tjson.get("data") or []
@@ -31,20 +40,60 @@ def normalize_3col(df):
     df.columns = ["column_name", "description", "comments"]
     return df
 
-# ✅ Source-level header removal (Column | Description | Comments/notes etc.)
+# ✅ remove per-table header row (source-level)
 def remove_table_header_rows(df):
     col = df["column_name"].fillna("").astype(str).str.strip().str.lower()
     des = df["description"].fillna("").astype(str).str.strip().str.lower()
     com = df["comments"].fillna("").astype(str).str.strip().str.lower()
 
-    # comments cell can be: "comments", "comments/notes", "comments / notes", "comment", etc.
     is_header = (
-        col.eq("column") &
+        col.str.match(r"^column(\s*name)?$", na=False) &
         des.eq("description") &
         com.str.match(r"^comments(\s*/\s*notes)?$", na=False)
     )
-
     return df[~is_header].reset_index(drop=True)
+
+# ✅ merge wrapped multi-line rows into one logical row
+def merge_multiline_rows(df):
+    """
+    If column_name is empty on a row, treat it as continuation of the previous row.
+    Appends description/comments text to previous row with newline separator.
+    """
+    if df.empty:
+        return df
+
+    merged_rows = []
+    current = None
+
+    def norm_cell(x):
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return ""
+        return str(x).strip()
+
+    for _, r in df.iterrows():
+        c0 = norm_cell(r["column_name"])
+        c1 = norm_cell(r["description"])
+        c2 = norm_cell(r["comments"])
+
+        if c0:  # new logical row
+            if current is not None:
+                merged_rows.append(current)
+            current = {"column_name": c0, "description": c1, "comments": c2}
+        else:
+            # continuation row: append to previous
+            if current is None:
+                # weird case: starts with blank col_name; keep it as its own row
+                current = {"column_name": "", "description": c1, "comments": c2}
+            else:
+                if c1:
+                    current["description"] = (current["description"] + "\n" + c1).strip() if current["description"] else c1
+                if c2:
+                    current["comments"] = (current["comments"] + "\n" + c2).strip() if current["comments"] else c2
+
+    if current is not None:
+        merged_rows.append(current)
+
+    return pd.DataFrame(merged_rows)
 
 def extract_lines_with_y(plumber_page, y_tol=3):
     words = plumber_page.extract_words()
@@ -70,7 +119,7 @@ def labels_on_page(lines):
     for ln in lines:
         m = DB_RE.search(ln["text"])
         if m:
-            out.append((float(ln["top"]), m.group(1)))
+            out.append((float(ln["top"]), normalize_db_label(m)))
     out.sort(key=lambda x: x[0])
     return out
 
@@ -83,12 +132,12 @@ def find_label_near_table(lines, table_top, max_scan=700):
         if y < table_top and (table_top - y) <= max_scan:
             m = DB_RE.search(ln["text"])
             if m and (best_y is None or y > best_y):
-                best_y, best_label = y, m.group(1)
+                best_y, best_label = y, normalize_db_label(m)
     return best_label
 
-# ----------------------------
+# ------------------------------------------------------------
 # MAIN
-# ----------------------------
+# ------------------------------------------------------------
 all_parts = []
 active_label = ""
 
@@ -113,7 +162,7 @@ with pdfplumber.open(PDF_PATH) as pdf:
         page_lines = extract_lines_with_y(pdf.pages[page_num - 1])
         page_labels = labels_on_page(page_lines)
 
-        # If page has label but no tables -> handoff
+        # If page has label but no tables -> label applies going forward
         if (not tables_json) and page_labels:
             active_label = page_labels[-1][1]
             continue
@@ -133,7 +182,7 @@ with pdfplumber.open(PDF_PATH) as pdf:
             if bottom is not None:
                 last_table_bottom = bottom if last_table_bottom is None else max(last_table_bottom, bottom)
 
-            # new table start if label is above this table
+            # new table start if label is above THIS table
             label_above = find_label_near_table(page_lines, top, max_scan=700)
             if label_above:
                 active_label = label_above
@@ -146,8 +195,13 @@ with pdfplumber.open(PDF_PATH) as pdf:
             if df is None:
                 continue
 
-            # ✅ remove header row right here (source-level)
+            # ✅ clean at source level
             df = remove_table_header_rows(df)
+            if df.empty:
+                continue
+
+            # ✅ fix wrapped multi-line rows
+            df = merge_multiline_rows(df)
             if df.empty:
                 continue
 
@@ -156,17 +210,17 @@ with pdfplumber.open(PDF_PATH) as pdf:
 
             all_parts.append(df)
 
-        # label below last table applies to next page
+        # label below last table applies to next page (Case2)
         if page_labels:
             if last_table_bottom is not None:
                 labels_below = [lbl for (y, lbl) in page_labels if y > last_table_bottom]
                 if labels_below:
                     active_label = labels_below[-1]
             else:
-                # fallback if we couldn't compute bottoms
                 active_label = page_labels[-1][1]
 
 combined = pd.concat(all_parts, ignore_index=True) if all_parts else pd.DataFrame()
 display(combined)
 
+# Save if needed
 # combined.to_csv("final_output.csv", index=False)
