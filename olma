@@ -1,4 +1,3 @@
 irm https://ollama.com/install.ps1 | iex
 curl -fsSL https://ollama.com/install.sh | sh
 
-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
