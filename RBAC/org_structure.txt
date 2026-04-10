@@ -1,0 +1,16 @@
+Organization structure
+
+President -> peter
+HR -> anithA, dinakar
+Architect -> prashanth_kumar
+Data Engineer -> poorna_prasadh
+DevOps -> Sunny
+developers -> barath, vishal
+tester -> manikanth, ajay
+lead -> gagan
+project manager -> venkat
+BA -> AKSHAY
+Scrum master -> Anirudh
+admins -> sree, Vijay
+Support -> Daniel, Gopal
+UI/UX Designer -> Vineeth
