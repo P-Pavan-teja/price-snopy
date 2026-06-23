@@ -1,0 +1,14 @@
+{
+  "s3_source_files_location": "PRJ_UNZIP/Source_files",
+  "s3_target_files_location": "PRJ_UNZIP/Target_files",
+  "archive_files_location": "PRJ_UNZIP/ARCHIVE_FILES",
+  "rejected_files_location": "PRJ_UNZIP/REJECTED_FILES",
+  "count_location": "PRJ_UNZIP/Count_files",
+  "zip_file_name": "SAMPLE_DATA.zip",
+  "has_header": true,
+  "split_size_mb": 250,
+  "read_block_mb": 16,
+  "max_threads": 12,
+  "max_pool_connections": 60,
+  "transfer_max_concurrency": 12
+}
