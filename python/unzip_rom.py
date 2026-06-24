@@ -10,14 +10,15 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import boto3
+from botocore.config import Config
+from boto3.s3.transfer import TransferConfig
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-log = logging.getLogger(__name__)
 
-s3 = boto3.client("s3")
+log = logging.getLogger(__name__)
 
 
 def today_folder():
@@ -28,23 +29,9 @@ def normalize_prefix(value):
     return str(value).strip().strip("/")
 
 
-def move_s3_object(bucket, source_key, target_base_prefix):
-    base_prefix = normalize_prefix(target_base_prefix)
-    dated_prefix = f"{base_prefix}/{today_folder()}"
-    target_key = f"{dated_prefix}/{os.path.basename(source_key)}"
-
-    log.info("Moving zip from s3://%s/%s to s3://%s/%s", bucket, source_key, bucket, target_key)
-    s3.copy_object(
-        Bucket=bucket,
-        CopySource={"Bucket": bucket, "Key": source_key},
-        Key=target_key
-    )
-    s3.delete_object(Bucket=bucket, Key=source_key)
-    return target_key
-
-
 def load_params_from_s3(bucket, param_key):
-    response = s3.get_object(Bucket=bucket, Key=param_key)
+    bootstrap_s3 = boto3.client("s3")
+    response = bootstrap_s3.get_object(Bucket=bucket, Key=param_key)
     content = response["Body"].read().decode("utf-8")
     return json.loads(content)
 
@@ -64,7 +51,7 @@ def parse_bool(value, default=True):
     return default
 
 
-def get_zip_keys(bucket, source_folder, zip_input):
+def get_zip_keys(s3, bucket, source_folder, zip_input):
     zip_keys = []
 
     if str(zip_input).strip().upper() == "ALL":
@@ -83,40 +70,80 @@ def get_zip_keys(bucket, source_folder, zip_input):
     return zip_keys
 
 
+def is_valid_csv(member_name):
+    name = member_name.replace("\\", "/").strip("/")
+    base = os.path.basename(name)
+    return (
+        bool(name)
+        and not name.endswith("/")
+        and not name.startswith("__MACOSX/")
+        and not base.startswith("._")
+        and name.lower().endswith(".csv")
+    )
+
+
 def get_csv_files(local_zip_path):
     csv_files = []
-
     with zipfile.ZipFile(local_zip_path) as zf:
         for member in zf.infolist():
-            name = member.filename.replace("\\", "/").strip("/")
-            base = os.path.basename(name)
-
-            if (
-                name
-                and not name.endswith("/")
-                and not name.startswith("__MACOSX/")
-                and not base.startswith("._")
-                and name.lower().endswith(".csv")
-            ):
+            if is_valid_csv(member.filename):
                 csv_files.append(member)
-
     return csv_files
 
 
-def upload_small_file(bucket, target_folder, local_zip_path, zip_name, member_name):
+def upload_bytes(s3, bucket, key, data, transfer_config):
+    s3.upload_fileobj(
+        Fileobj=io.BytesIO(data),
+        Bucket=bucket,
+        Key=key,
+        ExtraArgs={"ContentType": "text/csv"},
+        Config=transfer_config
+    )
+
+
+def move_s3_object(s3, bucket, source_key, target_base_prefix):
+    base_prefix = normalize_prefix(target_base_prefix)
+    dated_prefix = f"{base_prefix}/{today_folder()}"
+    target_key = f"{dated_prefix}/{os.path.basename(source_key)}"
+
+    log.info("Moving zip from s3://%s/%s to s3://%s/%s", bucket, source_key, bucket, target_key)
+    s3.copy_object(
+        Bucket=bucket,
+        CopySource={"Bucket": bucket, "Key": source_key},
+        Key=target_key
+    )
+    s3.delete_object(Bucket=bucket, Key=source_key)
+    return target_key
+
+
+def build_small_file_key(target_folder, zip_name, member_name):
+    clean_name = member_name.replace("\\", "/").strip("/")
+    return f"{target_folder.rstrip('/')}/{today_folder()}/{zip_name}/all_small_files/{clean_name}"
+
+
+def build_large_file_key(target_folder, zip_name, file_base, part_number):
+    return (
+        f"{target_folder.rstrip('/')}/{today_folder()}/{zip_name}/"
+        f"all_large_files/{file_base}/{file_base}_part{str(part_number).zfill(3)}.csv"
+    )
+
+
+def upload_small_file(
+    s3,
+    bucket,
+    target_folder,
+    local_zip_path,
+    zip_name,
+    member_name,
+    transfer_config
+):
     with zipfile.ZipFile(local_zip_path) as zf:
-        with zf.open(member_name) as src:
-            data = src.read()
+        data = zf.read(member_name)
 
     clean_name = member_name.replace("\\", "/").strip("/")
-    out_key = f"{target_folder.rstrip('/')}/{zip_name}/{clean_name}"
+    out_key = build_small_file_key(target_folder, zip_name, member_name)
 
-    s3.upload_fileobj(
-        io.BytesIO(data),
-        bucket,
-        out_key,
-        ExtraArgs={"ContentType": "text/csv"}
-    )
+    upload_bytes(s3, bucket, out_key, data, transfer_config)
     log.info("Uploaded small file: %s", out_key)
 
     return {
@@ -126,14 +153,33 @@ def upload_small_file(bucket, target_folder, local_zip_path, zip_name, member_na
     }
 
 
-def upload_small_files(bucket, target_folder, local_zip_path, zip_name, small_files, max_threads):
+def upload_small_files(
+    s3,
+    bucket,
+    target_folder,
+    local_zip_path,
+    zip_name,
+    small_files,
+    max_threads,
+    transfer_config
+):
     results = []
+
     log.info("Phase 1: uploading small files in parallel")
 
     with ThreadPoolExecutor(max_workers=max_threads) as pool:
         futures = [
-            pool.submit(upload_small_file, bucket, target_folder, local_zip_path, zip_name, member.filename)
-            for member in small_files
+            pool.submit(
+                upload_small_file,
+                s3,
+                bucket,
+                target_folder,
+                local_zip_path,
+                zip_name,
+                m.filename,
+                transfer_config
+            )
+            for m in small_files
         ]
 
         for future in as_completed(futures):
@@ -142,10 +188,21 @@ def upload_small_files(bucket, target_folder, local_zip_path, zip_name, small_fi
     return results
 
 
-def split_large_file(bucket, target_folder, local_zip_path, zip_name, member_name, has_header, split_size, read_block, max_threads):
+def split_large_file(
+    s3,
+    bucket,
+    target_folder,
+    local_zip_path,
+    zip_name,
+    member_name,
+    has_header,
+    split_size,
+    read_block,
+    max_threads,
+    transfer_config
+):
     clean_name = member_name.replace("\\", "/").strip("/")
     file_base = os.path.splitext(os.path.basename(clean_name))[0]
-    out_dir = f"{target_folder.rstrip('/')}/{zip_name}/{file_base}"
 
     header = b""
     leftover = b""
@@ -171,7 +228,8 @@ def split_large_file(bucket, target_folder, local_zip_path, zip_name, member_nam
                     header = bytes(first)
                     leftover = b""
 
-            futures = []
+            upload_futures = []
+
             with ThreadPoolExecutor(max_workers=max_threads) as pool:
                 while True:
                     block = stream.read(read_block)
@@ -192,20 +250,31 @@ def split_large_file(bucket, target_folder, local_zip_path, zip_name, member_nam
                     current_part.extend(data)
 
                     if len(current_part) >= split_size:
-                        out_key = f"{out_dir}/{file_base}_part{str(part_number).zfill(3)}.csv"
+                        out_key = build_large_file_key(
+                            target_folder=target_folder,
+                            zip_name=zip_name,
+                            file_base=file_base,
+                            part_number=part_number
+                        )
                         payload = header + bytes(current_part)
-                        futures.append(pool.submit(
-                            s3.upload_fileobj,
-                            io.BytesIO(payload),
-                            bucket,
-                            out_key,
-                            ExtraArgs={"ContentType": "text/csv"}
-                        ))
+
+                        upload_futures.append(
+                            pool.submit(
+                                upload_bytes,
+                                s3,
+                                bucket,
+                                out_key,
+                                payload,
+                                transfer_config
+                            )
+                        )
+
                         uploaded_rows.append({
                             "source_full_csv_file_name": clean_name,
                             "target_full_csv_file_name": out_key,
                             "is_split": True
                         })
+
                         log.info("Uploading split file: %s", out_key)
                         part_number += 1
                         current_part = bytearray()
@@ -214,29 +283,50 @@ def split_large_file(bucket, target_folder, local_zip_path, zip_name, member_nam
                     current_part.extend(leftover)
 
                 if current_part:
-                    out_key = f"{out_dir}/{file_base}_part{str(part_number).zfill(3)}.csv"
+                    out_key = build_large_file_key(
+                        target_folder=target_folder,
+                        zip_name=zip_name,
+                        file_base=file_base,
+                        part_number=part_number
+                    )
                     payload = header + bytes(current_part)
-                    futures.append(pool.submit(
-                        s3.upload_fileobj,
-                        io.BytesIO(payload),
-                        bucket,
-                        out_key,
-                        ExtraArgs={"ContentType": "text/csv"}
-                    ))
+
+                    upload_futures.append(
+                        pool.submit(
+                            upload_bytes,
+                            s3,
+                            bucket,
+                            out_key,
+                            payload,
+                            transfer_config
+                        )
+                    )
+
                     uploaded_rows.append({
                         "source_full_csv_file_name": clean_name,
                         "target_full_csv_file_name": out_key,
                         "is_split": True
                     })
+
                     log.info("Uploading split file: %s", out_key)
 
-                for future in as_completed(futures):
+                for future in as_completed(upload_futures):
                     future.result()
 
     return uploaded_rows
 
 
-def process_zip_file(bucket, target_folder, zip_key, has_header, split_size, read_block, max_threads):
+def process_zip_file(
+    s3,
+    bucket,
+    target_folder,
+    zip_key,
+    has_header,
+    split_size,
+    read_block,
+    max_threads,
+    transfer_config
+):
     log.info("Processing ZIP: %s", zip_key)
 
     zip_name = os.path.splitext(os.path.basename(zip_key))[0]
@@ -254,13 +344,24 @@ def process_zip_file(bucket, target_folder, zip_key, has_header, split_size, rea
         log.info("Small files: %s | Large files: %s", len(small_files), len(large_files))
 
         if small_files:
-            upload_small_files(bucket, target_folder, local_zip_path, zip_name, small_files, max_threads)
+            upload_small_files(
+                s3=s3,
+                bucket=bucket,
+                target_folder=target_folder,
+                local_zip_path=local_zip_path,
+                zip_name=zip_name,
+                small_files=small_files,
+                max_threads=max_threads,
+                transfer_config=transfer_config
+            )
 
         if large_files:
             log.info("Phase 2: processing large files one by one")
             for member in large_files:
                 log.info("Splitting file: %s", member.filename)
+
                 split_large_file(
+                    s3=s3,
                     bucket=bucket,
                     target_folder=target_folder,
                     local_zip_path=local_zip_path,
@@ -269,13 +370,13 @@ def process_zip_file(bucket, target_folder, zip_key, has_header, split_size, rea
                     has_header=has_header,
                     split_size=split_size,
                     read_block=read_block,
-                    max_threads=max_threads
+                    max_threads=max_threads,
+                    transfer_config=transfer_config
                 )
 
     finally:
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            log.info("Deleted temp folder: %s", temp_dir)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        log.info("Deleted temp folder: %s", temp_dir)
 
 
 def main():
@@ -297,11 +398,38 @@ def main():
 
         zip_input = str(params.get("zip_file_name", "ALL")).strip()
         has_header = parse_bool(params.get("has_header", True), default=True)
-        split_size = int(params.get("split_size_mb", 250)) * 1024 * 1024
-        read_block = int(params.get("read_block_mb", 16)) * 1024 * 1024
-        max_threads = int(params.get("max_threads", 6))
 
-        zip_keys = get_zip_keys(bucket, source_folder, zip_input)
+        split_size_mb = int(params.get("split_size_mb", 250))
+        read_block_mb = int(params.get("read_block_mb", 16))
+        max_threads = int(params.get("max_threads", min((os.cpu_count() or 4) * 2, 12)))
+        max_pool_connections = int(params.get("max_pool_connections", max(50, max_threads * 4)))
+        transfer_max_concurrency = int(params.get("transfer_max_concurrency", max_threads))
+
+        split_size = split_size_mb * 1024 * 1024
+        read_block = read_block_mb * 1024 * 1024
+
+        s3_config = Config(
+            max_pool_connections=max_pool_connections,
+            retries={"max_attempts": 5, "mode": "adaptive"},
+            tcp_keepalive=True
+        )
+        s3 = boto3.client("s3", config=s3_config)
+
+        transfer_config = TransferConfig(
+            multipart_threshold=8 * 1024 * 1024,
+            multipart_chunksize=8 * 1024 * 1024,
+            max_concurrency=transfer_max_concurrency,
+            use_threads=True
+        )
+
+        log.info(
+            "S3 config | max_threads=%s | max_pool_connections=%s | transfer_max_concurrency=%s",
+            max_threads,
+            max_pool_connections,
+            transfer_max_concurrency
+        )
+
+        zip_keys = get_zip_keys(s3, bucket, source_folder, zip_input)
 
         if not zip_keys:
             log.info("No zip files found. Exiting successfully.")
@@ -312,21 +440,25 @@ def main():
         for zip_key in zip_keys:
             try:
                 process_zip_file(
+                    s3=s3,
                     bucket=bucket,
                     target_folder=target_folder,
                     zip_key=zip_key,
                     has_header=has_header,
                     split_size=split_size,
                     read_block=read_block,
-                    max_threads=max_threads
+                    max_threads=max_threads,
+                    transfer_config=transfer_config
                 )
-                archived_key = move_s3_object(bucket, zip_key, archive_folder)
+
+                archived_key = move_s3_object(s3, bucket, zip_key, archive_folder)
                 log.info("Archived ZIP successfully: s3://%s/%s", bucket, archived_key)
+
             except Exception:
                 failed = True
                 log.exception("Failed processing ZIP: %s", zip_key)
                 try:
-                    rejected_key = move_s3_object(bucket, zip_key, rejected_folder)
+                    rejected_key = move_s3_object(s3, bucket, zip_key, rejected_folder)
                     log.info("Moved failed ZIP to rejected: s3://%s/%s", bucket, rejected_key)
                 except Exception:
                     log.exception("Failed moving ZIP to rejected folder: %s", zip_key)
