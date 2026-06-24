@@ -100,16 +100,23 @@ def upload_bytes(s3, bucket, key, data, transfer_config):
     )
 
 
-def move_s3_object(s3, bucket, source_key, target_base_prefix):
+def move_s3_object(s3, bucket, source_key, target_base_prefix, transfer_config):
     base_prefix = normalize_prefix(target_base_prefix)
     dated_prefix = f"{base_prefix}/{today_folder()}"
     target_key = f"{dated_prefix}/{os.path.basename(source_key)}"
 
     log.info("Moving zip from s3://%s/%s to s3://%s/%s", bucket, source_key, bucket, target_key)
-    s3.copy_object(
+
+    copy_source = {
+        "Bucket": bucket,
+        "Key": source_key
+    }
+
+    s3.copy(
+        CopySource=copy_source,
         Bucket=bucket,
-        CopySource={"Bucket": bucket, "Key": source_key},
-        Key=target_key
+        Key=target_key,
+        Config=transfer_config
     )
     s3.delete_object(Bucket=bucket, Key=source_key)
     return target_key
@@ -117,13 +124,13 @@ def move_s3_object(s3, bucket, source_key, target_base_prefix):
 
 def build_small_file_key(target_folder, zip_name, member_name):
     clean_name = member_name.replace("\\", "/").strip("/")
-    return f"{target_folder.rstrip('/')}/{today_folder()}/{zip_name}/all_small_files/{clean_name}"
+    return f"{target_folder.rstrip('/')}/{today_folder()}/{zip_name}/{clean_name}"
 
 
 def build_large_file_key(target_folder, zip_name, file_base, part_number):
     return (
         f"{target_folder.rstrip('/')}/{today_folder()}/{zip_name}/"
-        f"all_large_files/{file_base}/{file_base}_part{str(part_number).zfill(3)}.csv"
+        f"{file_base}/{file_base}_part{str(part_number).zfill(3)}.csv"
     )
 
 
@@ -410,8 +417,7 @@ def main():
 
         s3_config = Config(
             max_pool_connections=max_pool_connections,
-            retries={"max_attempts": 5, "mode": "adaptive"},
-            tcp_keepalive=True
+            retries={"max_attempts": 5, "mode": "adaptive"}
         )
         s3 = boto3.client("s3", config=s3_config)
 
@@ -451,14 +457,26 @@ def main():
                     transfer_config=transfer_config
                 )
 
-                archived_key = move_s3_object(s3, bucket, zip_key, archive_folder)
+                archived_key = move_s3_object(
+                    s3=s3,
+                    bucket=bucket,
+                    source_key=zip_key,
+                    target_base_prefix=archive_folder,
+                    transfer_config=transfer_config
+                )
                 log.info("Archived ZIP successfully: s3://%s/%s", bucket, archived_key)
 
             except Exception:
                 failed = True
                 log.exception("Failed processing ZIP: %s", zip_key)
                 try:
-                    rejected_key = move_s3_object(s3, bucket, zip_key, rejected_folder)
+                    rejected_key = move_s3_object(
+                        s3=s3,
+                        bucket=bucket,
+                        source_key=zip_key,
+                        target_base_prefix=rejected_folder,
+                        transfer_config=transfer_config
+                    )
                     log.info("Moved failed ZIP to rejected: s3://%s/%s", bucket, rejected_key)
                 except Exception:
                     log.exception("Failed moving ZIP to rejected folder: %s", zip_key)
