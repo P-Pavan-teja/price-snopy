@@ -1,11 +1,10 @@
+# download
 import sys
 import io
 import os
 import json
 import zipfile
-import shutil
 import logging
-import tempfile
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -330,11 +329,11 @@ def process_zip_file(
     log.info("Processing ZIP: %s", zip_key)
 
     zip_name = os.path.splitext(os.path.basename(zip_key))[0]
-    temp_dir = tempfile.mkdtemp(prefix="s3_zip_")
-    local_zip_path = os.path.join(temp_dir, os.path.basename(zip_key))
+    cwd = os.getcwd()
+    local_zip_path = os.path.join(cwd, os.path.basename(zip_key))
 
     try:
-        log.info("Downloading ZIP to local disk: %s", local_zip_path)
+        log.info("Downloading ZIP to current working directory: %s", local_zip_path)
         s3.download_file(bucket, zip_key, local_zip_path)
 
         csv_files = get_csv_files(local_zip_path)
@@ -375,8 +374,9 @@ def process_zip_file(
                 )
 
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        log.info("Deleted temp folder: %s", temp_dir)
+        if os.path.exists(local_zip_path):
+            os.remove(local_zip_path)
+            log.info("Deleted local ZIP file: %s", local_zip_path)
 
 
 def main():
