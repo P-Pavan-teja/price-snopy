@@ -1,0 +1,8 @@
+{
+  "s3_zip_folder": "Prj_unzip/ZIP_FILES/",
+  "s3_unzip_folder": "Prj_unzip/SOURCE_FILES/",
+  "s3_archive_folder": "Prj_unzip/ARCHIVE_FILES",
+  "zip_file_name": "ALL",                      
+  "delete_zip_after_archive": true,      
+  "skip_files": ["ORDERS.csv"] 
+}
