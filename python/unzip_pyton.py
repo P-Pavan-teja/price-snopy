@@ -246,7 +246,7 @@ def main():
         matched_unzip_root = None
         for rule in routing_rules:
             prefix = rule.get("prefix", "")
-            if prefix and zip_basename.startswith(prefix):
+            if prefix and zip_basename.lower().startswith(prefix.lower()):
                 matched_unzip_root = rule["unzip_folder"]
                 logging.info(
                     f"{zip_basename} matched prefix '{prefix}' -> unzip root {matched_unzip_root}"
