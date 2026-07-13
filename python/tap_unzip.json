@@ -5,7 +5,7 @@
   "delete_zip_after_archive": true,
   "skip_files": ["ORDERS.csv"],
   "routing_rules": [
-    {"prefix": "abc_", "unzip_folder": "Prj_unzip/SOURCE_FILES/"},
-    {"prefix": "bhdj_", "unzip_folder": "Prj_tpa/SOURCE_FILES/"}
+    {"prefix": "abc_", "unzip_folder": "Prj_unzip/SOURCE_FILES/", "file_prefix": "ABC_"},
+    {"prefix": "bhdj_", "unzip_folder": "Prj_tpa/SOURCE_FILES/", "file_prefix": "BHDJ_"}
   ]
 }
