@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import datetime
 from io import BytesIO
 
 import boto3
@@ -152,13 +153,14 @@ def archive_zip(
     bucket: str,
     zip_key: str,
     archive_prefix: str,
+    archive_date: str,
     delete_after: bool,
 ):
     """
     Copy ZIP to archive folder. Optionally delete original.
     """
     zip_name = zip_key.split("/")[-1]
-    archive_key = f"{archive_prefix}{zip_name}"
+    archive_key = f"{archive_prefix}{archive_date}/ZIP_FILE/{zip_name}"
     logging.info(f"Archiving ZIP {zip_key} -> s3://{bucket}/{archive_key}")
 
     s3_client.copy_object(
@@ -195,11 +197,13 @@ def main():
         sys.exit(1)
 
     zip_folder = cfg.get("s3_zip_folder", "")
-    unzip_root = cfg.get("s3_unzip_folder", "")
     archive_folder = cfg.get("s3_archive_folder", "")
     zip_file_name = cfg.get("zip_file_name", "ALL")
     delete_zip_after_archive = bool(cfg.get("delete_zip_after_archive", True))
     skip_files = cfg.get("skip_files", []) or []
+    # Each rule: {"prefix": "abc_", "unzip_folder": "Prj_unzip/SOURCE_FILES/"}
+    # Zips whose name matches no prefix are archived without unzipping.
+    routing_rules = cfg.get("routing_rules", []) or []
 
     # Normalize prefixes
     def ensure_suffix_slash(p: str) -> str:
@@ -208,8 +212,9 @@ def main():
         return p
 
     zip_folder = ensure_suffix_slash(zip_folder)
-    unzip_root = ensure_suffix_slash(unzip_root)
     archive_folder = ensure_suffix_slash(archive_folder)
+    for rule in routing_rules:
+        rule["unzip_folder"] = ensure_suffix_slash(rule.get("unzip_folder", ""))
 
     # Determine ZIPs to process
     zip_keys = []
@@ -231,13 +236,43 @@ def main():
         logging.info("No ZIP files to process, exiting cleanly.")
         return
 
+    archive_date = datetime.now().strftime("%Y%m%d")
+
     # Process each ZIP
     for zip_key in zip_keys:
+        zip_basename = zip_key.split("/")[-1]
+
+        # Resolve destination unzip folder based on zip filename prefix
+        matched_unzip_root = None
+        for rule in routing_rules:
+            prefix = rule.get("prefix", "")
+            if prefix and zip_basename.startswith(prefix):
+                matched_unzip_root = rule["unzip_folder"]
+                logging.info(
+                    f"{zip_basename} matched prefix '{prefix}' -> unzip root {matched_unzip_root}"
+                )
+                break
+
+        if matched_unzip_root is None:
+            # No routing rule matched: skip unzip, archive the ZIP as-is
+            logging.info(
+                f"{zip_basename} matched no routing rule, archiving without unzipping"
+            )
+            archive_zip(
+                s3_client=s3_client,
+                bucket=bucket,
+                zip_key=zip_key,
+                archive_prefix=archive_folder,
+                archive_date=archive_date,
+                delete_after=delete_zip_after_archive,
+            )
+            continue
+
         unzip_s3_zip_to_s3_per_zip_folder(
             s3_client=s3_client,
             bucket=bucket,
             zip_key=zip_key,
-            unzip_root=unzip_root,
+            unzip_root=matched_unzip_root,
             skip_files=skip_files,
         )
 
@@ -245,7 +280,7 @@ def main():
         delete_files_in_unzip_subfolder(
             s3_client=s3_client,
             bucket=bucket,
-            unzip_root=unzip_root,
+            unzip_root=matched_unzip_root,
             zip_key=zip_key,
             skip_files=skip_files,
         )
@@ -255,6 +290,7 @@ def main():
             bucket=bucket,
             zip_key=zip_key,
             archive_prefix=archive_folder,
+            archive_date=archive_date,
             delete_after=delete_zip_after_archive,
         )
 
