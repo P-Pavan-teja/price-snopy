@@ -105,6 +105,7 @@ def unzip_s3_zip_to_s3_per_zip_folder(
     zip_key: str,
     unzip_root: str,
     skip_files: list,
+    file_prefix: str = "",
 ):
     """
     Unzip one S3 ZIP to S3 under:
@@ -134,7 +135,9 @@ def unzip_s3_zip_to_s3_per_zip_folder(
                 )
                 continue
 
-            target_key = f"{unzip_prefix_for_zip}{member_name}"
+            member_dir, _, member_base = member_name.rpartition("/")
+            prefixed_base = f"{file_prefix}{member_base}"
+            target_key = f"{unzip_prefix_for_zip}{member_dir + '/' if member_dir else ''}{prefixed_base}"
             logging.info(
                 f"Uploading member {member_name} -> s3://{bucket}/{target_key}"
             )
@@ -244,10 +247,12 @@ def main():
 
         # Resolve destination unzip folder based on zip filename prefix
         matched_unzip_root = None
+        matched_file_prefix = ""
         for rule in routing_rules:
             prefix = rule.get("prefix", "")
             if prefix and zip_basename.lower().startswith(prefix.lower()):
                 matched_unzip_root = rule["unzip_folder"]
+                matched_file_prefix = rule.get("file_prefix", "") or ""
                 logging.info(
                     f"{zip_basename} matched prefix '{prefix}' -> unzip root {matched_unzip_root}"
                 )
@@ -274,6 +279,7 @@ def main():
             zip_key=zip_key,
             unzip_root=matched_unzip_root,
             skip_files=skip_files,
+            file_prefix=matched_file_prefix,
         )
 
         # Delete any existing files matching skip_files in this ZIP's unzip subfolder
