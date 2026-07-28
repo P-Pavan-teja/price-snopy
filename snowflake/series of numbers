@@ -1,0 +1,7 @@
+WITH RECURSIVE seq AS (
+    SELECT 1 AS n          -- anchor query
+    UNION ALL              -- accumulation
+    SELECT n + 1 FROM seq  -- incremental logic
+    WHERE n < 300           -- depth-driven termination condition
+)
+SELECT n FROM seq;
